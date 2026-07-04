@@ -28,45 +28,62 @@ function messagesToText(messages: ModelMessage[]): string {
 }
 
 /**
- * Compact a conversation by summarizing it with an LLM.
+ * Find a safe boundary to keep the tail of the conversation intact.
  *
- * Takes the current messages (excluding system prompt) and returns a new
- * messages array with:
- * - A user message containing the summary
- * - An assistant acknowledgment
+ * We cut at the last user message: everything before it gets summarized, and
+ * the last user turn (plus any assistant/tool exchange that followed) is kept
+ * verbatim. Cutting on a user boundary guarantees we never split a
+ * tool-call/tool-result pair, which would produce an invalid history.
+ */
+function findRecentBoundary(messages: ModelMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      return i;
+    }
+  }
+  return messages.length;
+}
+
+/**
+ * Compact a conversation by summarizing its older messages with an LLM.
  *
- * The system prompt should be prepended by the caller.
+ * The most recent turn is the one the model needs verbatim, so only the older
+ * tail is summarized. Returns:
+ * - A single user message containing the summary
+ * - The recent messages, unchanged
+ *
+ * The system prompt is prepended by the caller.
  */
 export async function compactConversation(
   messages: ModelMessage[],
   model: string = "gpt-5-mini",
 ): Promise<ModelMessage[]> {
-  // Filter out system messages - they're handled separately
+  // System messages are owned by the caller and handled separately.
   const conversationMessages = messages.filter((m) => m.role !== "system");
 
   if (conversationMessages.length === 0) {
     return [];
   }
 
-  const conversationText = messagesToText(conversationMessages);
+  const boundary = findRecentBoundary(conversationMessages);
+  const older = conversationMessages.slice(0, boundary);
+  const recent = conversationMessages.slice(boundary);
+
+  // Nothing old enough to summarize — leave the conversation as-is.
+  if (older.length === 0) {
+    return conversationMessages;
+  }
 
   const { text: summary } = await generateText({
     model: openai(model),
-    prompt: SUMMARIZATION_PROMPT + conversationText,
+    prompt: SUMMARIZATION_PROMPT + messagesToText(older),
   });
 
-  // Create compacted messages
-  const compactedMessages: ModelMessage[] = [
+  return [
     {
       role: "user",
-      content: `[CONVERSATION SUMMARY]\nThe following is a summary of our conversation so far:\n\n${summary}\n\nPlease continue from where we left off.`,
+      content: `[CONVERSATION SUMMARY]\nThe following summarizes the earlier part of our conversation:\n\n${summary}`,
     },
-    {
-      role: "assistant",
-      content:
-        "I understand. I've reviewed the summary of our conversation and I'm ready to continue. How can I help you next?",
-    },
+    ...recent,
   ];
-
-  return compactedMessages;
 }

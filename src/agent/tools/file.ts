@@ -2,6 +2,14 @@ import { tool } from "ai";
 import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
+import { truncateOutput } from "./truncate.ts";
+
+/**
+ * Generous cap for file reads (~16k tokens). Real source files pass through
+ * untouched; a giant log or minified bundle gets capped so it can't blow the
+ * context window.
+ */
+const MAX_FILE_CHARS = 60_000;
 
 /**
  * Read file contents
@@ -15,7 +23,7 @@ export const readFile = tool({
   execute: async ({ path: filePath }: { path: string }) => {
     try {
       const content = await fs.readFile(filePath, "utf-8");
-      return content;
+      return truncateOutput(content, MAX_FILE_CHARS);
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
       if (err.code === "ENOENT") {

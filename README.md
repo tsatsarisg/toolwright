@@ -14,34 +14,43 @@ A general-purpose, terminal-based AI agent built from first principles in TypeSc
 ## Setup
 
 ```bash
-npm install
+pnpm install
 ```
 
 Create a `.env` file in the project root with your API keys:
 
 ```bash
 OPENAI_API_KEY=your-key-here
+# Optional: enables Laminar tracing/evals
+LMNR_API_KEY=your-key-here
 ```
 
 ## Usage
 
 ```bash
 # Run in development (watch mode)
-npm run dev
+pnpm dev
 
 # Run once
-npm start
+pnpm start
 
 # Build the CLI
-npm run build
+pnpm build
+```
+
+## Tests
+
+```bash
+# Fast, deterministic unit tests (no API key required)
+pnpm test
 ```
 
 ## Evals
 
 ```bash
-npm run eval:file-tools
-npm run eval:shell-tools
-npm run eval:agent
+pnpm eval:file-tools
+pnpm eval:shell-tools
+pnpm eval:agent
 ```
 
 ## Project Structure

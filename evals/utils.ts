@@ -30,14 +30,18 @@ export const buildMockedTools = (
 };
 
 /**
- * Build message array from eval data
+ * Build the system prompt and message array from eval data.
+ *
+ * The system prompt is returned separately so callers can pass it via the
+ * SDK's `system` option instead of embedding it in `messages` (which the SDK
+ * warns against as a prompt-injection risk).
  */
 export const buildMessages = (
   data: EvalData | { prompt?: string; systemPrompt?: string },
-): ModelMessage[] => {
-  const systemPrompt = data.systemPrompt ?? SYSTEM_PROMPT;
-  return [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: data.prompt! },
-  ];
+): { system: string; messages: ModelMessage[] } => {
+  const system = data.systemPrompt ?? SYSTEM_PROMPT;
+  return {
+    system,
+    messages: [{ role: "user", content: data.prompt! }],
+  };
 };

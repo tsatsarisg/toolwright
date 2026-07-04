@@ -12,6 +12,7 @@
     "build": "tsc -p tsconfig.build.json",
     "dev": "tsx watch --env-file=.env src/index.ts",
     "start": "tsx --env-file=.env src/index.ts",
+    "test": "node --import tsx --test \"src/**/*.test.ts\" \"evals/**/*.test.ts\"",
     "eval": "npx lmnr eval",
     "eval:file-tools": "npx lmnr eval evals/file-tools.eval.ts",
     "eval:shell-tools": "npx lmnr eval evals/shell-tools.eval.ts",
@@ -27,13 +28,10 @@
   "dependencies": {
     "@ai-sdk/openai": "^2.0.72",
     "@lmnr-ai/lmnr": "0.8.36",
-    "@types/shelljs": "^0.8.17",
     "ai": "^5.0.102",
-    "friday-agent": "link:",
     "ink": "^6.5.1",
     "ink-spinner": "^5.0.0",
     "react": "^19.2.0",
-    "shelljs": "^0.10.0",
     "zod": "^4.1.13"
   },
   "packageManager": "pnpm@11.9.0+sha512.bd682d5d03fe525ef7c9fd6780c6884d1e756ac4c9c9fe00c538782824310dcf90e3ddc4f53835f06dfaebd5085e41855e0bcbb3b60de2ac5bbab89e5036f03b"

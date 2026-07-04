@@ -1,43 +1,100 @@
 import type { ModelMessage } from "ai";
+
+/** Loose view of a content part; the SDK's union types don't expose every
+ * field on every member, so we read fields defensively through this. */
+type LoosePart = { type?: string; toolCallId?: string; text?: string };
+
+function asPart(part: unknown): LoosePart {
+  return (part ?? {}) as LoosePart;
+}
+
+function collectIds(messages: ModelMessage[]) {
+  const callIds = new Set<string>();
+  const resultIds = new Set<string>();
+
+  for (const msg of messages) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const raw of msg.content) {
+      const part = asPart(raw);
+      if (typeof part.toolCallId !== "string") continue;
+      if (part.type === "tool-call") callIds.add(part.toolCallId);
+      if (part.type === "tool-result") resultIds.add(part.toolCallId);
+    }
+  }
+
+  return { callIds, resultIds };
+}
+
 /**
- * Filter conversation history to only include compatible message formats.
- * Provider tools (like webSearch) may return messages with formats that
- * cause issues when passed back to subsequent API calls.
+ * Filter conversation history so it stays valid to replay to the model.
+ *
+ * Two invariants are enforced:
+ *  - The system prompt is owned by runAgent, so any system messages carried in
+ *    history are dropped here (prevents them accumulating turn over turn).
+ *  - Tool calls and tool results are kept as atomic pairs: a `tool-call` part is
+ *    only kept if a matching `tool-result` exists, and vice versa. This prevents
+ *    orphaned tool results/calls, which the API rejects with a 400.
  */
 export const filterCompatibleMessages = (
   messages: ModelMessage[],
 ): ModelMessage[] => {
-  return messages.filter((msg) => {
-    // Keep user and system messages
-    if (msg.role === "user" || msg.role === "system") {
-      return true;
+  const { callIds, resultIds } = collectIds(messages);
+  const result: ModelMessage[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      continue;
     }
 
-    // Keep assistant messages that have text content
+    if (msg.role === "user") {
+      result.push(msg);
+      continue;
+    }
+
     if (msg.role === "assistant") {
-      const content = msg.content;
-      if (typeof content === "string" && content.trim()) {
-        return true;
+      if (typeof msg.content === "string") {
+        if (msg.content.trim()) result.push(msg);
+        continue;
       }
-      // Check for array content with text parts
-      if (Array.isArray(content)) {
-        const hasTextContent = content.some((part: unknown) => {
-          if (typeof part === "string" && part.trim()) return true;
-          if (typeof part === "object" && part !== null && "text" in part) {
-            const textPart = part as { text?: string };
-            return textPart.text && textPart.text.trim();
+      if (Array.isArray(msg.content)) {
+        const parts = msg.content.filter((raw) => {
+          const part = asPart(raw);
+          if (part.type === "tool-call") {
+            // Keep only calls that have a matching result.
+            return (
+              typeof part.toolCallId === "string" &&
+              resultIds.has(part.toolCallId)
+            );
           }
-          return false;
+          if (part.type === "text") {
+            return typeof part.text === "string" && part.text.trim().length > 0;
+          }
+          // Preserve other part kinds (reasoning, file, provider tool-result).
+          return true;
         });
-        return hasTextContent;
+        if (parts.length > 0) {
+          result.push({ ...msg, content: parts } as ModelMessage);
+        }
       }
+      continue;
     }
 
-    // Keep tool messages
     if (msg.role === "tool") {
-      return true;
+      if (!Array.isArray(msg.content)) continue;
+      const parts = msg.content.filter((raw) => {
+        const part = asPart(raw);
+        if (part.type !== "tool-result") return true;
+        // Keep only results whose originating call survives.
+        return (
+          typeof part.toolCallId === "string" && callIds.has(part.toolCallId)
+        );
+      });
+      if (parts.length > 0) {
+        result.push({ ...msg, content: parts } as ModelMessage);
+      }
+      continue;
     }
+  }
 
-    return false;
-  });
+  return result;
 };

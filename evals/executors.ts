@@ -14,7 +14,7 @@ export async function singleTurnExecutor(
   data: EvalData,
   availableTools: ToolSet,
 ): Promise<SingleTurnResult> {
-  const messages = buildMessages(data);
+  const { system, messages } = buildMessages(data);
 
   // Filter to only tools specified in data
   const tools: ToolSet = {};
@@ -26,6 +26,7 @@ export async function singleTurnExecutor(
 
   const result = await generateText({
     model: openai(data.config?.model ?? "gpt-5-mini"),
+    system,
     messages,
     tools,
     stopWhen: stepCountIs(1), // Single step - just get tool selection
@@ -56,14 +57,23 @@ export async function multiTurnWithMocks(
 ): Promise<MultiTurnResult> {
   const tools = buildMockedTools(data.mockTools);
 
-  // Build messages from either prompt or pre-filled history
-  const messages: ModelMessage[] = data.messages ?? [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: data.prompt! },
-  ];
+  // Separate the system prompt from the conversation so it can be passed via
+  // the `system` option rather than embedded in `messages`.
+  let system = SYSTEM_PROMPT;
+  let messages: ModelMessage[];
+  if (data.messages) {
+    const systemMessage = data.messages.find((m) => m.role === "system");
+    if (systemMessage && typeof systemMessage.content === "string") {
+      system = systemMessage.content;
+    }
+    messages = data.messages.filter((m) => m.role !== "system");
+  } else {
+    messages = [{ role: "user", content: data.prompt! }];
+  }
 
   const result = await generateText({
     model: openai(data.config?.model ?? "gpt-5-mini"),
+    system,
     messages,
     tools,
     stopWhen: stepCountIs(data.config?.maxSteps ?? 20),
