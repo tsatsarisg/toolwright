@@ -1,7 +1,7 @@
 import { streamText, type ModelMessage } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { getTracer } from "@lmnr-ai/lmnr";
-import { tools } from "./tools/index.ts";
+import { modelTools } from "./tools/index.ts";
 import { executeTool } from "./executeTool.ts";
 import { SYSTEM_PROMPT } from "./system/prompt.ts";
 import { Laminar } from "@lmnr-ai/lmnr";
@@ -74,7 +74,7 @@ export async function runAgent(
     const result = streamText({
       model: openai(MODEL_NAME),
       messages,
-      tools,
+      tools: modelTools,
       experimental_telemetry: {
         isEnabled: true,
         tracer: getTracer(),
@@ -141,11 +141,30 @@ export async function runAgent(
     // Process tool calls sequentially with approval for each
     let rejected = false;
     for (const tc of toolCalls) {
-      const approved = await callbacks.onToolApproval(tc.toolName, tc.args);
+      // After a rejection, stop prompting but still record a result for every
+      // remaining call — the API requires each tool call to have a paired
+      // tool result.
+      const approved = rejected
+        ? false
+        : await callbacks.onToolApproval(tc.toolName, tc.args);
 
       if (!approved) {
         rejected = true;
-        break;
+        messages.push({
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              output: {
+                type: "text",
+                value: "The user declined to run this tool.",
+              },
+            },
+          ],
+        });
+        continue;
       }
 
       const result = await executeTool(tc.toolName, tc.args);
