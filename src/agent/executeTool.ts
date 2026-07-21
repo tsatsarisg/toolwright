@@ -1,4 +1,5 @@
 import type { ToolSet } from "ai";
+import type { ZodType } from "zod";
 import { tools as defaultTools } from "./tools/index.ts";
 
 /**
@@ -10,39 +11,39 @@ import { tools as defaultTools } from "./tools/index.ts";
  * can retry with corrected arguments rather than crashing the loop.
  */
 export async function executeTool(
-  name: string,
-  args: Record<string, unknown>,
-  toolSet: ToolSet = defaultTools,
+	name: string,
+	args: Record<string, unknown>,
+	toolSet: ToolSet = defaultTools,
 ): Promise<string> {
-  const tool = toolSet[name];
+	const tool = toolSet[name];
 
-  if (!tool) {
-    return `Unknown tool: ${name}`;
-  }
+	if (!tool) {
+		return `Unknown tool: ${name}`;
+	}
 
-  const execute = tool.execute;
-  if (!execute) {
-    // Provider tools (like webSearch) are executed by the provider, not us
-    return `Provider tool ${name} - executed by model provider`;
-  }
+	const execute = tool.execute;
+	if (!execute) {
+		// Provider tools (like webSearch) are executed by the provider, not us
+		return `Provider tool ${name} - executed by model provider`;
+	}
 
-  // Validate against the tool's input schema before executing.
-  const schema = tool.inputSchema as
-    | { safeParse?: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } }
-    | undefined;
-  let validatedArgs: unknown = args;
-  if (schema && typeof schema.safeParse === "function") {
-    const parsed = schema.safeParse(args);
-    if (!parsed.success) {
-      return `Invalid arguments for ${name}: ${parsed.error?.message ?? "schema validation failed"}`;
-    }
-    validatedArgs = parsed.data;
-  }
+	// Validate against the tool's input schema before executing. Every tool in
+	// this app defines its schema with zod, so this is a real ZodType, not a
+	// hand-rolled structural guess at the SDK's schema shape.
+	const schema = tool.inputSchema as ZodType | undefined;
+	let validatedArgs: unknown = args;
+	if (schema) {
+		const parsed = schema.safeParse(args);
+		if (!parsed.success) {
+			return `Invalid arguments for ${name}: ${parsed.error.message}`;
+		}
+		validatedArgs = parsed.data;
+	}
 
-  const result = await execute(validatedArgs as never, {
-    toolCallId: "",
-    messages: [],
-  });
+	const result = await execute(validatedArgs as never, {
+		toolCallId: "",
+		messages: [],
+	});
 
-  return String(result);
+	return String(result);
 }

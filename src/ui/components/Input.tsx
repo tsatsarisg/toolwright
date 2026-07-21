@@ -1,42 +1,42 @@
-import React, { useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput } from "ink";
+import { useState } from "react";
 
 interface InputProps {
-  onSubmit: (value: string) => void;
-  disabled?: boolean;
+	onSubmit: (value: string) => void;
+	disabled?: boolean;
 }
 
 export function Input({ onSubmit, disabled = false }: InputProps) {
-  const [value, setValue] = useState('');
+	const [value, setValue] = useState("");
 
-  useInput((input, key) => {
-    if (disabled) return;
+	useInput((input, key) => {
+		if (disabled) return;
 
-    if (key.return) {
-      if (value.trim()) {
-        onSubmit(value);
-        setValue('');
-      }
-      return;
-    }
+		if (key.return) {
+			if (value.trim()) {
+				onSubmit(value);
+				setValue("");
+			}
+			return;
+		}
 
-    if (key.backspace || key.delete) {
-      setValue((prev) => prev.slice(0, -1));
-      return;
-    }
+		if (key.backspace || key.delete) {
+			setValue((prev) => prev.slice(0, -1));
+			return;
+		}
 
-    if (input && !key.ctrl && !key.meta) {
-      setValue((prev) => prev + input);
-    }
-  });
+		if (input && !key.ctrl && !key.meta) {
+			setValue((prev) => prev + input);
+		}
+	});
 
-  return (
-    <Box>
-      <Text color="blue" bold>
-        {'> '}
-      </Text>
-      <Text>{value}</Text>
-      {!disabled && <Text color="gray">▌</Text>}
-    </Box>
-  );
+	return (
+		<Box>
+			<Text color="blue" bold>
+				{"> "}
+			</Text>
+			<Text>{value}</Text>
+			{!disabled && <Text color="gray">▌</Text>}
+		</Box>
+	);
 }

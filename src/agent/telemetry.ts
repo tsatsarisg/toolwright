@@ -8,9 +8,9 @@ let initialized = false;
  * the agent for tests or evals doesn't require an API key or open a tracer.
  */
 export function initTelemetry(): void {
-  if (initialized) return;
-  const projectApiKey = process.env.LMNR_API_KEY;
-  if (!projectApiKey) return;
-  Laminar.initialize({ projectApiKey });
-  initialized = true;
+	if (initialized) return;
+	const projectApiKey = process.env.LMNR_API_KEY;
+	if (!projectApiKey) return;
+	Laminar.initialize({ projectApiKey });
+	initialized = true;
 }
