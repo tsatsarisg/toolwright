@@ -15,9 +15,9 @@ const MAX_FILE_CHARS = 60_000;
  * By default every file tool is confined to the current working directory —
  * the approval prompt is the only other gate, and confining the blast radius
  * of a reflexive "Yes" to the project directory is cheap insurance. Set
- * FRIDAY_ALLOW_UNSAFE_PATHS=1 to allow reads/writes anywhere the OS user can.
+ * TOOLWRIGHT_ALLOW_UNSAFE_PATHS=1 to allow reads/writes anywhere the OS user can.
  */
-const ALLOW_OUTSIDE_CWD = process.env.FRIDAY_ALLOW_UNSAFE_PATHS === "1";
+const ALLOW_OUTSIDE_CWD = process.env.TOOLWRIGHT_ALLOW_UNSAFE_PATHS === "1";
 
 class PathConfinementError extends Error {}
 
@@ -31,7 +31,7 @@ function resolveSafePath(filePath: string): string {
 	if (!isInside) {
 		throw new PathConfinementError(
 			`Refusing to access "${filePath}" — it resolves outside the working directory. ` +
-				`Set FRIDAY_ALLOW_UNSAFE_PATHS=1 to allow paths outside the project.`,
+				`Set TOOLWRIGHT_ALLOW_UNSAFE_PATHS=1 to allow paths outside the project.`,
 		);
 	}
 	return resolved;

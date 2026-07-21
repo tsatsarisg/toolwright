@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ModelMessage } from "ai";
 
-const SESSIONS_ROOT = path.join(os.homedir(), ".friday", "sessions");
+const SESSIONS_ROOT = path.join(os.homedir(), ".toolwright", "sessions");
 
 /**
  * Turn a cwd into a filesystem-safe directory name, so sessions from

@@ -14,7 +14,7 @@ import { ToolApproval } from "./components/ToolApproval.tsx";
 import { ToolCall, type ToolCallProps } from "./components/ToolCall.tsx";
 
 interface AppProps {
-	/** Id this session is saved under (~/.friday/sessions/<project>/<id>.json). */
+	/** Id this session is saved under (~/.toolwright/sessions/<project>/<id>.json). */
 	sessionId: string;
 	/** History loaded back in via --resume, if any. */
 	initialHistory?: ModelMessage[];

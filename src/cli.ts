@@ -11,12 +11,12 @@ import { initTelemetry } from "./agent/telemetry.ts";
 import type { AgentCallbacks } from "./types.ts";
 import { App } from "./ui/App.tsx";
 
-const HELP = `friday — a terminal AI agent
+const HELP = `toolwright — a terminal AI agent
 
 Usage:
-  friday                        Start the interactive session
-  friday -p "prompt"            Run one prompt non-interactively and exit
-  friday --resume               Continue the most recent session in this directory
+  toolwright                        Start the interactive session
+  toolwright -p "prompt"            Run one prompt non-interactively and exit
+  toolwright --resume               Continue the most recent session in this directory
 
 Options:
   -m, --model <id>   Model id to use (default: gpt-5-mini)

@@ -1,6 +1,6 @@
 # Project Overview
 
-**Name:** Friday - Terminal AI Agent
+**Name:** Toolwright - Terminal AI Agent
 **Description:** A general-purpose, terminal-based AI agent built from first principles using TypeScript and the Vercel AI SDK. No agent frameworks, no magic — just a custom tool-calling loop with conversation history.
 
 See [README.md](../README.md) for tech stack, setup, and project structure. This file covers conventions and architecture context relevant to writing spec-driven changes — not repeated there.

@@ -28,7 +28,7 @@ const NO_RESPONSE_FALLBACK =
 	"I apologize, but I wasn't able to generate a response. Could you please try rephrasing your message?";
 
 /** Opt-in escape hatch for full-content tracing; see the telemetry span config below. */
-const RECORD_TELEMETRY_IO = process.env.FRIDAY_TELEMETRY_RECORD_IO === "1";
+const RECORD_TELEMETRY_IO = process.env.TOOLWRIGHT_TELEMETRY_RECORD_IO === "1";
 
 export interface RunAgentOptions {
 	/** Model id to use (default: gpt-5-mini). Also drives the context-window lookup. */
@@ -233,7 +233,7 @@ export async function runAgent(
 					// default — meaning file contents, shell output, etc. would ship
 					// to Laminar's cloud once LMNR_API_KEY is set. Keep spans (useful
 					// for timing/flow) but not their content, unless explicitly opted
-					// into via FRIDAY_TELEMETRY_RECORD_IO=1.
+					// into via TOOLWRIGHT_TELEMETRY_RECORD_IO=1.
 					recordInputs: RECORD_TELEMETRY_IO,
 					recordOutputs: RECORD_TELEMETRY_IO,
 					tracer: getTracer(),

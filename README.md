@@ -1,6 +1,6 @@
-# Friday — Terminal AI Agent
+# Toolwright — Terminal AI Agent
 
-[![CI](https://github.com/tsatsarisg/friday-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/tsatsarisg/friday-agent/actions/workflows/ci.yml)
+[![CI](https://github.com/tsatsarisg/toolwright/actions/workflows/ci.yml/badge.svg)](https://github.com/tsatsarisg/toolwright/actions/workflows/ci.yml)
 
 A general-purpose, terminal-based AI agent built from first principles in TypeScript. No agent frameworks — just a custom tool-calling loop with conversation history, built on the Vercel AI SDK with an Ink (React) terminal UI.
 
@@ -27,7 +27,7 @@ Create a `.env` file in the project root with your API keys:
 ```bash
 OPENAI_API_KEY=your-key-here
 # Optional: enables Laminar tracing/evals. Spans are recorded WITHOUT prompt/tool
-# content by default — set FRIDAY_TELEMETRY_RECORD_IO=1 to opt into full tracing.
+# content by default — set TOOLWRIGHT_TELEMETRY_RECORD_IO=1 to opt into full tracing.
 LMNR_API_KEY=your-key-here
 ```
 
@@ -40,18 +40,18 @@ pnpm dev
 # Run once
 pnpm start
 
-# Build, then install the `friday` command globally
+# Build, then install the `toolwright` command globally
 pnpm build
 npm install -g .
-friday
+toolwright
 ```
 
 ### CLI flags
 
 ```
-friday                        Start the interactive session
-friday -p "prompt"            Run one prompt non-interactively and exit
-friday --resume               Continue the most recent session in this directory
+toolwright                        Start the interactive session
+toolwright -p "prompt"            Run one prompt non-interactively and exit
+toolwright --resume               Continue the most recent session in this directory
 
 -m, --model <id>   Model id to use (default: gpt-5-mini)
 -p, --print <text> Run one prompt non-interactively, print the response, and exit
@@ -61,9 +61,9 @@ friday --resume               Continue the most recent session in this directory
 -h, --help         Show this help
 ```
 
-Sessions are saved per-project under `~/.friday/sessions/`, not in the repo you run `friday` from.
+Sessions are saved per-project under `~/.toolwright/sessions/`, not in the repo you run `toolwright` from.
 
-By default, file tools are confined to the current working directory (set `FRIDAY_ALLOW_UNSAFE_PATHS=1` to lift that).
+By default, file tools are confined to the current working directory (set `TOOLWRIGHT_ALLOW_UNSAFE_PATHS=1` to lift that).
 
 ## Tests
 
