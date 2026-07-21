@@ -1,12 +1,6 @@
-import { evaluate } from "@lmnr-ai/lmnr";
 import { fileTools } from "../src/agent/tools/index.ts";
 import dataset from "./data/file-tools.json" with { type: "json" };
-import {
-	toolSelectionScore,
-	toolsAvoided,
-	toolsSelected,
-} from "./evaluators.ts";
-import { singleTurnExecutor } from "./executors.ts";
+import { runToolSelectionEval } from "./toolSelectionEval.ts";
 import type { EvalData, EvalTarget } from "./types.ts";
 
 /**
@@ -20,35 +14,8 @@ import type { EvalData, EvalTarget } from "./types.ts";
  * - secondary: Likely selects certain tools, scored on precision/recall
  * - negative: Must NOT select any file tools
  */
-
-// Executor that runs single-turn tool selection
-const executor = async (data: EvalData) => {
-	return singleTurnExecutor(data, fileTools);
-};
-
-// Run the evaluation
-evaluate({
-	data: dataset as Array<{ data: EvalData; target: EvalTarget }>,
-	executor,
-	evaluators: {
-		// For golden prompts: did it select all expected tools?
-		toolsSelected: (output, target) => {
-			if (target?.category !== "golden") return 1; // Skip for non-golden
-			return toolsSelected(output, target);
-		},
-		// For negative prompts: did it avoid forbidden tools?
-		toolsAvoided: (output, target) => {
-			if (target?.category !== "negative") return 1; // Skip for non-negative
-			return toolsAvoided(output, target);
-		},
-		// For secondary prompts: precision/recall score
-		selectionScore: (output, target) => {
-			if (target?.category !== "secondary") return 1; // Skip for non-secondary
-			return toolSelectionScore(output, target);
-		},
-	},
-	config: {
-		projectApiKey: process.env.LMNR_API_KEY,
-	},
-	groupName: "file-tools-selection",
-});
+runToolSelectionEval(
+	fileTools,
+	dataset as Array<{ data: EvalData; target: EvalTarget }>,
+	"file-tools-selection",
+);

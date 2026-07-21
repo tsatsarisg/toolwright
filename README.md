@@ -84,6 +84,8 @@ pnpm eval:shell-tools
 pnpm eval:agent
 ```
 
+Unlike `pnpm test`, these call the real model — they need `OPENAI_API_KEY` and cost tokens. `LMNR_API_KEY` is optional and only adds tracing.
+
 ## Project Structure
 
 ```
@@ -100,6 +102,7 @@ src/
 │   └── tools/                     # file, search, shell, webSearch
 └── ui/                              # Ink terminal UI components
 evals/                                # Laminar eval suites and data
+openspec/                             # Spec-driven change proposals (see openspec/AGENTS.md)
 ```
 
 ## License
