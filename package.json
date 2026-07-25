@@ -3,6 +3,7 @@
 	"version": "1.0.0",
 	"description": "A general-purpose, terminal-based AI agent built from first principles in TypeScript — a custom tool-calling loop on the Vercel AI SDK with an Ink terminal UI.",
 	"license": "UNLICENSED",
+	"private": true,
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/tsatsarisg/toolwright.git"
