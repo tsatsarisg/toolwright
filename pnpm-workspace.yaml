@@ -1,5 +1,41 @@
+
+minimumReleaseAge: 10080
+
+# Dependency lifecycle scripts (postinstall etc.) are blocked. Both
+# entries were audited and neither is required, so both are false:
+#   esbuild    → swaps its JS shim for the native binary; a startup
+#                optimization only — falls back to @esbuild/* packages
+#   protobufjs → version-bookkeeping postinstall; library works
+#                without it (verified by the test suite)
 allowBuilds:
-  esbuild: true
-  protobufjs: true
+  esbuild: false
+  protobufjs: false
+
+# `pnpm add` saves exact versions — no ^/~ ranges in package.json.
+savePrefix: ''
+
+# Transitive dependencies must resolve from the registry — never from
+# git/tarball/URL sources injected by a compromised intermediate.
+blockExoticSubdeps: true
+
+# Refuse a version published with weaker provenance than the previous
+# release (a common account-takeover signature). Versions older than a
+# year (pre-provenance era) are exempt — takeovers are caught within
+# days, not months.
+trustPolicy: no-downgrade
+trustPolicyIgnoreAfter: 525600
+
+# slow-redact@0.3.2 (via @lmnr-ai/lmnr → pino, by pino's own author) was
+# published 2025-10-11 without provenance while an earlier version had it
+# — verified benign on 2026-08-05. The exclusion can be dropped once the
+# version is >1 year old (after 2026-10-11, trustPolicyIgnoreAfter covers it).
+trustPolicyExclude:
+  - slow-redact
+
 overrides:
   toolwright: 'link:'
+  # Pin the excluded package to the exact version verified benign above.
+  # pino declares ^0.3.0, so without this a future 0.3.x would slip in
+  # unchecked through the trust exclusion on the next update. Bump this
+  # pin (and re-verify) only deliberately.
+  slow-redact: 0.3.2
