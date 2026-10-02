@@ -14,6 +14,7 @@ export async function executeTool(
 	name: string,
 	args: Record<string, unknown>,
 	toolSet: ToolSet = defaultTools,
+	abortSignal?: AbortSignal,
 ): Promise<string> {
 	const tool = toolSet[name];
 
@@ -40,10 +41,18 @@ export async function executeTool(
 		validatedArgs = parsed.data;
 	}
 
-	const result = await execute(validatedArgs as never, {
-		toolCallId: "",
-		messages: [],
-	});
+	abortSignal?.throwIfAborted();
+	try {
+		const result = await execute(validatedArgs as never, {
+			toolCallId: "",
+			messages: [],
+			abortSignal,
+			context: {},
+		});
 
-	return String(result);
+		return String(result);
+	} catch (error) {
+		abortSignal?.throwIfAborted();
+		return `Error: ${error instanceof Error ? error.message : String(error)}`;
+	}
 }

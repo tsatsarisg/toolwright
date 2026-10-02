@@ -1,4 +1,3 @@
-import { evaluate } from "@lmnr-ai/lmnr";
 import type { ToolSet } from "ai";
 import {
 	toolSelectionScore,
@@ -6,6 +5,7 @@ import {
 	toolsSelected,
 } from "./evaluators.ts";
 import { singleTurnExecutor } from "./executors.ts";
+import { runEvaluation } from "./runEvaluation.ts";
 import type { EvalData, EvalTarget } from "./types.ts";
 
 /**
@@ -21,7 +21,7 @@ export function runToolSelectionEval(
 ) {
 	const executor = async (data: EvalData) => singleTurnExecutor(data, toolSet);
 
-	evaluate({
+	return runEvaluation({
 		data: dataset,
 		executor,
 		evaluators: {
@@ -40,9 +40,6 @@ export function runToolSelectionEval(
 				if (target?.category !== "secondary") return 1; // Skip for non-secondary
 				return toolSelectionScore(output, target);
 			},
-		},
-		config: {
-			projectApiKey: process.env.LMNR_API_KEY,
 		},
 		groupName,
 	});

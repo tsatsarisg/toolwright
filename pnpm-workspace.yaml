@@ -1,5 +1,12 @@
 
 minimumReleaseAge: 10080
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+
+# New lifecycle scripts require an explicit decision before installation succeeds.
+strictDepBuilds: true
+strictPeerDependencies: true
+engineStrict: true
 
 # Dependency lifecycle scripts (postinstall etc.) are blocked. Both
 # entries were audited and neither is required, so both are false:
@@ -30,7 +37,8 @@ trustPolicyIgnoreAfter: 525600
 # — verified benign on 2026-08-05. The exclusion can be dropped once the
 # version is >1 year old (after 2026-10-11, trustPolicyIgnoreAfter covers it).
 trustPolicyExclude:
-  - slow-redact
+  - slow-redact@0.3.2
+trustPolicyExcludePrune: true
 
 overrides:
   toolwright: 'link:'

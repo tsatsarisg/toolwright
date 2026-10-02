@@ -1,6 +1,5 @@
-import fs from "node:fs/promises";
 import { Box, Text, useInput } from "ink";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { PREVIEW_ARG_KEYS } from "../../agent/tools/index.ts";
 import { truncate } from "../../agent/tools/truncate.ts";
 
@@ -9,6 +8,8 @@ interface ToolApprovalProps {
 	args: unknown;
 	/** Show elevated-risk styling (writeFile/editFile/deleteFile/runCommand). */
 	destructive: boolean;
+	preview?: string;
+	allowGrant?: boolean;
 	onResolve: (decision: "once" | "always" | "no") => void;
 }
 
@@ -52,57 +53,26 @@ function getArgsSummary(toolName: string, args: unknown): string {
 	return "";
 }
 
-/**
- * For writeFile, tell the user whether this creates a new file or overwrites
- * an existing one (and how big it currently is) — the raw JSON args preview
- * shows only the NEW content, giving no sense of what's being destroyed.
- */
-function useOverwriteNotice(toolName: string, args: unknown): string | null {
-	const [notice, setNotice] = useState<string | null>(null);
-	const filePath =
-		toolName === "writeFile" &&
-		typeof args === "object" &&
-		args !== null &&
-		typeof (args as Record<string, unknown>).path === "string"
-			? ((args as Record<string, unknown>).path as string)
-			: null;
-
-	useEffect(() => {
-		if (!filePath) {
-			setNotice(null);
-			return;
-		}
-		let cancelled = false;
-		fs.stat(filePath).then(
-			(stat) => {
-				if (!cancelled) {
-					setNotice(`This overwrites an existing ${stat.size}-byte file.`);
-				}
-			},
-			() => {
-				if (!cancelled) setNotice("This creates a new file.");
-			},
-		);
-		return () => {
-			cancelled = true;
-		};
-	}, [filePath]);
-
-	return filePath ? notice : null;
-}
-
 export function ToolApproval({
 	toolName,
 	args,
 	destructive,
+	preview: diffPreview,
+	allowGrant = true,
 	onResolve,
 }: ToolApprovalProps) {
 	const [selectedIndex, setSelectedIndex] = useState(0);
-	const overwriteNotice = useOverwriteNotice(toolName, args);
 	const options: Array<{ label: string; decision: "once" | "always" | "no" }> =
 		[
 			{ label: "Yes", decision: "once" },
-			{ label: "Always allow this session", decision: "always" },
+			...(allowGrant
+				? [
+						{
+							label: "Allow this path or exact command for this session",
+							decision: "always" as const,
+						},
+					]
+				: []),
 			{ label: "No", decision: "no" },
 		];
 
@@ -145,18 +115,9 @@ export function ToolApproval({
 					</Text>
 					{argsSummary && <Text dimColor>({argsSummary})</Text>}
 				</Text>
-				{overwriteNotice && (
-					<Text
-						color={
-							overwriteNotice.startsWith("This overwrites") ? "red" : "gray"
-						}
-					>
-						{overwriteNotice}
-					</Text>
-				)}
 				<Box marginLeft={2} flexDirection="column">
-					<Text dimColor>{preview}</Text>
-					{extraLines > 0 && (
+					<Text dimColor>{diffPreview ?? preview}</Text>
+					{!diffPreview && extraLines > 0 && (
 						<Text color="gray">... +{extraLines} more lines</Text>
 					)}
 				</Box>

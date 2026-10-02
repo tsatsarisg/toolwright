@@ -1,7 +1,7 @@
 {
 	"name": "toolwright",
 	"version": "1.0.0",
-	"description": "A general-purpose, terminal-based AI agent built from first principles in TypeScript — a custom tool-calling loop on the Vercel AI SDK with an Ink terminal UI.",
+	"description": "A terminal coding agent with OpenAI and local-model support, workspace tools, approvals, and durable sessions.",
 	"license": "UNLICENSED",
 	"private": true,
 	"repository": {
@@ -17,7 +17,7 @@
 	],
 	"type": "module",
 	"engines": {
-		"node": ">=20"
+		"node": ">=22.13.0"
 	},
 	"bin": {
 		"toolwright": "./dist/cli.js"
@@ -27,31 +27,36 @@
 	],
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
-		"dev": "tsx watch --env-file=.env src/cli.ts",
-		"start": "tsx --env-file=.env src/cli.ts",
+		"dev": "tsx watch src/cli.ts",
+		"start": "tsx src/cli.ts",
 		"test": "node --import tsx --test \"src/**/*.test.ts\" \"evals/**/*.test.ts\"",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"lint": "biome check .",
-		"eval": "npx lmnr eval",
-		"eval:file-tools": "npx lmnr eval evals/file-tools.eval.ts",
-		"eval:shell-tools": "npx lmnr eval evals/shell-tools.eval.ts",
-		"eval:agent": "npx lmnr eval evals/agent-multiturn.eval.ts"
+		"eval": "pnpm eval:coding",
+		"eval:file-tools": "node --import tsx evals/file-tools.eval.ts",
+		"eval:shell-tools": "node --import tsx evals/shell-tools.eval.ts",
+		"eval:agent": "node --import tsx evals/agent-multiturn.eval.ts",
+		"eval:coding": "node --import tsx evals/coding.eval.ts"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.3.7",
-		"@types/node": "24.13.2",
-		"@types/react": "19.2.17",
-		"tsx": "4.23.0",
-		"typescript": "5.9.3"
+		"@biomejs/biome": "2.5.14",
+		"@types/node": "26.6.2",
+		"@types/react": "19.3.0",
+		"tsx": "4.23.15",
+		"typescript": "7.0.2"
 	},
 	"dependencies": {
-		"@ai-sdk/openai": "2.0.110",
-		"@lmnr-ai/lmnr": "0.8.36",
-		"ai": "5.0.210",
-		"ink": "6.8.0",
+		"@ai-sdk/openai": "4.0.75",
+		"@ai-sdk/openai-compatible": "3.0.55",
+		"@ai-sdk/otel": "1.0.114",
+		"@ai-sdk/provider": "4.0.18",
+		"@ai-sdk/provider-utils": "5.0.47",
+		"@lmnr-ai/lmnr": "0.8.49",
+		"ai": "7.0.114",
+		"ink": "7.1.1",
 		"ink-spinner": "5.0.0",
-		"react": "19.2.7",
-		"zod": "4.4.3"
+		"react": "19.3.0",
+		"zod": "4.6.5"
 	},
-	"packageManager": "pnpm@11.19.0+sha512.7881f3ed590d472c4a955e2b88b2121791116066dcc88cbca3849ec9b60f1bbaa6d2ccb221fa91da4e1c65bef2bcbe379365aea7ac539c7bf86dedc3a1b22dce"
+	"packageManager": "pnpm@12.8.1+sha512.f64ba907507f5ceafe06c8d38e6052d0179444580ec1279ddd5bfc11cb48aa8a2644b66598e07e761da84872a9fc57d5f902b87fa49d024198d558612aabbe45"
 }

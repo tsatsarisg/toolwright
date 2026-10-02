@@ -13,6 +13,7 @@ export interface EvalData {
 	tools: string[];
 	/** Configuration for the LLM call */
 	config?: {
+		profile?: string;
 		model?: string;
 		temperature?: number;
 	};
@@ -68,6 +69,7 @@ export interface MultiTurnEvalData {
 	mockTools: Record<string, MockToolConfig>;
 	/** Configuration for the agent run */
 	config?: {
+		profile?: string;
 		model?: string;
 		maxSteps?: number;
 	};
@@ -93,6 +95,8 @@ export interface MultiTurnTarget {
  * Result from multi-turn executor
  */
 export interface MultiTurnResult {
+	/** Profile used for inference; the judge uses the same provider. */
+	providerSelection?: { profile: string; model: string };
 	/** Final text response from the agent */
 	text: string;
 	/** All steps taken during the agent loop */

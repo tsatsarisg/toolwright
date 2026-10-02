@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ModelMessage } from "ai";
-import { filterCompatibleMessages } from "./filterMessages.ts";
+import { filterCompatibleMessages, portableHistory } from "./filterMessages.ts";
 
 function toolCall(id: string) {
 	return {
-		type: "tool-call",
+		type: "tool-call" as const,
 		toolCallId: id,
 		toolName: "readFile",
 		input: {},
@@ -14,12 +14,42 @@ function toolCall(id: string) {
 
 function toolResult(id: string) {
 	return {
-		type: "tool-result",
+		type: "tool-result" as const,
 		toolCallId: id,
 		toolName: "readFile",
-		output: { type: "text", value: "ok" },
+		output: { type: "text" as const, value: "ok" },
 	};
 }
+
+test("model switches strip provider-specific replay metadata and preserve local tool pairs", () => {
+	const history: ModelMessage[] = [
+		{
+			role: "user",
+			content: "task",
+			providerOptions: { openai: { previousResponseId: "cloud-id" } },
+		},
+		{
+			role: "assistant",
+			content: [
+				{
+					type: "reasoning",
+					text: "reasoning",
+					providerOptions: { openai: { itemId: "reasoning-id" } },
+				},
+				{ type: "text", text: "inspected" },
+				toolCall("read"),
+			],
+		},
+		{ role: "tool", content: [toolResult("read")] },
+	];
+	const replay = portableHistory(history);
+	assert.equal(replay.length, 3);
+	assert.doesNotMatch(
+		JSON.stringify(replay),
+		/cloud-id|reasoning-id|providerOptions|reasoning/,
+	);
+	assert.deepEqual(replay, filterCompatibleMessages(replay));
+});
 
 test("drops system messages carried in history", () => {
 	const out = filterCompatibleMessages([

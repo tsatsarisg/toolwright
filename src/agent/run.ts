@@ -1,64 +1,66 @@
-import { getTracer } from "@lmnr-ai/lmnr";
 import {
 	type LanguageModel,
 	type ModelMessage,
 	streamText,
 	type ToolSet,
 } from "ai";
-import type { AgentCallbacks, ToolCallInfo } from "../types.ts";
-import { compactConversation } from "./context/compaction.ts";
+import { z } from "zod";
+import type {
+	AgentCallbacks,
+	RunOutcome,
+	TokenUsageInfo,
+	ToolCallInfo,
+} from "../types.ts";
+import type { ProviderSelection } from "./config.ts";
+import {
+	compactConversation,
+	defaultSummarizer,
+} from "./context/compaction.ts";
 import {
 	calculateUsagePercentage,
 	DEFAULT_THRESHOLD,
-	getModelLimits,
-	isOverThreshold,
 } from "./context/modelLimits.ts";
-import { estimateMessagesTokens } from "./context/tokenEstimator.ts";
-import { executeTool } from "./executeTool.ts";
-import { DEFAULT_MODEL, resolveModel } from "./model.ts";
-import { filterCompatibleMessages } from "./system/filterMessages.ts";
-import { SYSTEM_PROMPT } from "./system/prompt.ts";
 import {
-	tools as defaultTools,
-	READ_ONLY_TOOLS,
+	estimateMessagesTokens,
+	estimateTokens,
+} from "./context/tokenEstimator.ts";
+import { executeTool } from "./executeTool.ts";
+import { type ResolvedProvider, resolveProvider } from "./model.ts";
+import { ExecutionPolicy, type PermissionMode } from "./policy.ts";
+import {
+	filterCompatibleMessages,
+	portableHistory,
+} from "./system/filterMessages.ts";
+import { getSystemPrompt } from "./system/prompt.ts";
+import { inferenceTelemetry } from "./telemetry.ts";
+import {
+	createTools,
+	selectProviderTools,
 	toModelTools,
 } from "./tools/index.ts";
+import { truncateOutput } from "./tools/truncate.ts";
+import { Workspace } from "./workspace.ts";
 
-const NO_RESPONSE_FALLBACK =
-	"I apologize, but I wasn't able to generate a response. Could you please try rephrasing your message?";
-
-/** Opt-in escape hatch for full-content tracing; see the telemetry span config below. */
-const RECORD_TELEMETRY_IO = process.env.TOOLWRIGHT_TELEMETRY_RECORD_IO === "1";
-
-export interface RunAgentOptions {
-	/** Model id to use (default: gpt-5-mini). Also drives the context-window lookup. */
-	model?: string;
-	/**
-	 * Testing/DI seam: the actual LanguageModel passed to streamText. Defaults
-	 * to resolveModel(model). Pass a mock (e.g. ai/test's MockLanguageModelV2)
-	 * to drive the loop without a real API call.
-	 */
+export interface RunAgentOptions extends ProviderSelection {
+	resolvedProvider?: ResolvedProvider;
 	languageModel?: LanguageModel;
-	/** Executable toolset; the model is shown an execute-less view of it. */
 	tools?: ToolSet;
-	/** System prompt (default: the app's SYSTEM_PROMPT). */
 	systemPrompt?: string;
-	/** Emit Laminar telemetry spans (default: true). Off for tests/evals. */
 	telemetry?: boolean;
+	workspace?: Workspace;
+	policy?: ExecutionPolicy;
+	mode?: PermissionMode;
+	signal?: AbortSignal;
+	maxSteps?: number;
+	maxTokens?: number;
+	maxTurnMs?: number;
+	maxFailures?: number;
 }
-
 interface UsageReport {
 	inputTokens?: number;
 	outputTokens?: number;
 	totalTokens?: number;
 }
-
-/**
- * Estimate (or, when the provider gave us real counts, report) token usage
- * and hand it to the caller's callback. Takes everything it needs as
- * parameters rather than closing over runAgent's locals, so it's testable
- * on its own.
- */
 export function reportTokenUsage(
 	callbacks: AgentCallbacks,
 	systemPrompt: string,
@@ -67,38 +69,26 @@ export function reportTokenUsage(
 	real?: UsageReport,
 ): void {
 	if (!callbacks.onTokenUsage) return;
-
-	let input: number;
-	let output: number;
-	let total: number;
-
-	if (real && (real.totalTokens ?? 0) > 0) {
-		// Prefer the provider's actual counts when we have them.
-		input = real.inputTokens ?? 0;
-		output = real.outputTokens ?? 0;
-		total = real.totalTokens ?? input + output;
-	} else {
-		// Include the system prompt (sent via the `system` option, not in
-		// `messages`) so the estimate reflects the full request.
-		const est = estimateMessagesTokens([
-			{ role: "system", content: systemPrompt },
-			...currentMessages,
-		]);
-		input = est.input;
-		output = est.output;
-		total = est.total;
-	}
-
-	callbacks.onTokenUsage({
+	const estimate = estimateMessagesTokens([
+		{ role: "system", content: systemPrompt },
+		...currentMessages,
+	]);
+	const hasReal = (real?.totalTokens ?? 0) > 0;
+	const input = hasReal ? (real?.inputTokens ?? 0) : estimate.input;
+	const output = hasReal ? (real?.outputTokens ?? 0) : estimate.output;
+	const total = hasReal
+		? (real?.totalTokens ?? input + output)
+		: estimate.total;
+	const usage: TokenUsageInfo = {
 		inputTokens: input,
 		outputTokens: output,
 		totalTokens: total,
 		contextWindow,
 		threshold: DEFAULT_THRESHOLD,
 		percentage: calculateUsagePercentage(total, contextWindow),
-	});
+	};
+	callbacks.onTokenUsage(usage);
 }
-
 function toolResultMessage(tc: ToolCallInfo, value: string): ModelMessage {
 	return {
 		role: "tool",
@@ -112,210 +102,481 @@ function toolResultMessage(tc: ToolCallInfo, value: string): ModelMessage {
 		],
 	};
 }
-
+function abortable<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return pending;
+	signal.throwIfAborted();
+	return new Promise((resolve, reject) => {
+		const abort = () => reject(signal.reason);
+		signal.addEventListener("abort", abort, { once: true });
+		pending
+			.then(resolve, reject)
+			.finally(() => signal.removeEventListener("abort", abort));
+	});
+}
 export interface ToolResolution {
 	toolMessages: ModelMessage[];
 	rejected: boolean;
+	failures: string[];
 }
-
-/**
- * Ask approval (skipping read-only tools) and execute each pending tool
- * call in order. Pulled out of runAgent's main loop as its own function —
- * this is the seam that makes approval/rejection sequencing directly
- * testable with a fake approval callback and a fake executor, without
- * touching streamText at all.
- *
- * Once one call is declined, every remaining call in the batch is recorded
- * as declined too, without re-prompting — the API requires a paired tool
- * result for every tool call, and re-prompting after a "no" would just be
- * fatigue for no benefit. This is the loop's only termination flag; it also
- * tells the caller to end the outer turn.
- */
 export async function resolveToolCalls(
 	toolCalls: ToolCallInfo[],
 	executableTools: ToolSet,
 	baseMessages: ModelMessage[],
-	callbacks: Pick<AgentCallbacks, "onToolApproval" | "onToolCallEnd">,
-	reportUsage: (currentMessages: ModelMessage[]) => void,
+	callbacks: Pick<
+		AgentCallbacks,
+		"onToolApproval" | "onToolCallEnd" | "onCheckpoint"
+	>,
+	reportUsage: (messages: ModelMessage[]) => void,
+	options: {
+		policy?: ExecutionPolicy;
+		workspace?: Workspace;
+		signal?: AbortSignal;
+		maxChars?: number;
+		instructionContext?: string;
+	} = {},
 ): Promise<ToolResolution> {
 	const toolMessages: ModelMessage[] = [];
+	const failures: string[] = [];
+	const policy = options.policy ?? new ExecutionPolicy();
 	let rejected = false;
-
 	for (const tc of toolCalls) {
-		const approved = READ_ONLY_TOOLS.has(tc.toolName)
-			? true
-			: rejected
-				? false
-				: await callbacks.onToolApproval(tc.toolName, tc.args);
-
-		if (!approved) {
-			rejected = true;
-			const declined = "The user declined to run this tool.";
-			toolMessages.push(toolResultMessage(tc, declined));
-			callbacks.onToolCallEnd(tc.toolCallId, declined);
-			continue;
+		let result: string;
+		try {
+			options.signal?.throwIfAborted();
+			const definition = Object.hasOwn(executableTools, tc.toolName)
+				? executableTools[tc.toolName]
+				: undefined;
+			if (!definition) {
+				result = `Tool unavailable for this provider or policy: ${tc.toolName}`;
+				rejected = true;
+			} else if (rejected) result = "The user declined to run this tool.";
+			else {
+				const parsed = (
+					definition.inputSchema as z.ZodType | undefined
+				)?.safeParse(tc.args);
+				if (parsed && !parsed.success)
+					result = `Invalid arguments for ${tc.toolName}: ${parsed.error.message}`;
+				else {
+					const args = (parsed?.data ?? tc.args) as Record<string, unknown>;
+					const authorization = await policy.decide(
+						tc.toolName,
+						args,
+						executableTools,
+						options.workspace,
+					);
+					if (authorization?.decision === "deny") {
+						result = `Policy denied ${tc.toolName} in ${options.policy?.mode} mode.`;
+						rejected = true;
+					} else {
+						const mutation =
+							options.workspace &&
+							["writeFile", "editFile", "deleteFile"].includes(tc.toolName)
+								? await options.workspace.prepare(
+										tc.toolName,
+										args,
+										options.signal,
+									)
+								: undefined;
+						const guidance = mutation
+							? await options.workspace?.instructions(options.signal)
+							: undefined;
+						if (
+							guidance !== undefined &&
+							options.instructionContext !== undefined &&
+							guidance !== options.instructionContext
+						) {
+							result =
+								"Additional scoped project instructions were discovered. Review the refreshed guidance before requesting this edit again.";
+						} else {
+							if (authorization)
+								authorization.details.preview = mutation?.preview;
+							const auto = authorization.decision === "allow";
+							const approved =
+								auto ||
+								(await abortable(
+									callbacks.onToolApproval(
+										tc.toolName,
+										args,
+										authorization?.details,
+									),
+									options.signal,
+								));
+							options.signal?.throwIfAborted();
+							if (!approved) {
+								rejected = true;
+								result = "The user declined to run this tool.";
+							} else
+								result =
+									mutation && options.workspace
+										? await options.workspace.apply(mutation, options.signal)
+										: await executeTool(
+												tc.toolName,
+												args,
+												executableTools,
+												options.signal,
+											);
+						}
+					}
+				}
+			}
+		} catch (error) {
+			if (options.signal?.aborted) {
+				for (const remaining of toolCalls.slice(toolMessages.length)) {
+					const cancelled =
+						"Tool interrupted; it will not be replayed automatically.";
+					toolMessages.push(toolResultMessage(remaining, cancelled));
+					callbacks.onToolCallEnd(remaining.toolCallId, cancelled);
+				}
+				await callbacks.onCheckpoint?.(
+					filterCompatibleMessages([...baseMessages, ...toolMessages]),
+				);
+				return { toolMessages, rejected: true, failures };
+			}
+			result = `Error: ${error instanceof Error ? error.message : String(error)}`;
 		}
-
-		const toolResult = await executeTool(tc.toolName, tc.args, executableTools);
-		callbacks.onToolCallEnd(tc.toolCallId, toolResult);
-		toolMessages.push(toolResultMessage(tc, toolResult));
+		if (/^(Error:|Invalid arguments|Unknown tool)/.test(result))
+			failures.push(tc.toolName);
+		result = boundedToolResult(tc.toolName, result, options.maxChars ?? 16000);
+		toolMessages.push(toolResultMessage(tc, result));
+		callbacks.onToolCallEnd(tc.toolCallId, result);
 		reportUsage([...baseMessages, ...toolMessages]);
+		await callbacks.onCheckpoint?.(
+			filterCompatibleMessages([...baseMessages, ...toolMessages]),
+		);
 	}
-
-	return { toolMessages, rejected };
+	return { toolMessages, rejected, failures };
 }
 
-/**
- * Run one agent turn.
- *
- * Returns the conversation history WITHOUT the system prompt — runAgent owns
- * the system prompt and prepends it on every call, so callers must store and
- * pass back only the conversation.
- */
+function schemaTokens(tools: ToolSet): number {
+	return estimateTokens(
+		JSON.stringify(
+			Object.entries(tools).map(([name, definition]) => {
+				let schema: unknown;
+				try {
+					schema = z.toJSONSchema(definition.inputSchema as z.ZodType);
+				} catch {
+					schema = {};
+				}
+				return { name, description: definition.description, schema };
+			}),
+		),
+	);
+}
+
+class TokenBudgetExceeded extends Error {}
+
+function boundedToolResult(
+	name: string,
+	result: string,
+	maxChars: number,
+): string {
+	if (name === "runCommand") {
+		try {
+			const command = JSON.parse(result);
+			if (
+				typeof command.stdout === "string" &&
+				typeof command.stderr === "string"
+			) {
+				return JSON.stringify({
+					...command,
+					stdout: truncateOutput(command.stdout, Math.floor(maxChars / 3)),
+					stderr: truncateOutput(command.stderr, Math.floor(maxChars / 3)),
+				});
+			}
+		} catch {
+			/* Validation and execution errors are plain text. */
+		}
+	}
+	return truncateOutput(result, maxChars);
+}
+
 export async function runAgent(
 	userMessage: string,
 	conversationHistory: ModelMessage[],
 	callbacks: AgentCallbacks,
 	options: RunAgentOptions = {},
 ): Promise<ModelMessage[]> {
-	const modelId = options.model ?? DEFAULT_MODEL;
-	const languageModel = options.languageModel ?? resolveModel(modelId);
-	const executableTools = options.tools ?? defaultTools;
+	const started = Date.now();
+	const provider = options.resolvedProvider ?? resolveProvider(options);
+	const languageModel = options.languageModel ?? provider.languageModel;
+	const workspace =
+		options.workspace ?? (options.tools ? undefined : await Workspace.open());
+	const policy = options.policy ?? new ExecutionPolicy(options.mode ?? "edit");
+	const executableTools = selectProviderTools(
+		provider.settings,
+		options.tools ??
+			(workspace ? createTools(workspace, callbacks.onCommandOutput) : {}),
+	);
+	if (policy.mode === "plan") delete executableTools.webSearch;
 	const modelTools = toModelTools(executableTools);
-	const systemPrompt = options.systemPrompt ?? SYSTEM_PROMPT;
-	const telemetryEnabled = options.telemetry ?? true;
-
-	const modelLimits = getModelLimits(modelId);
-	const contextWindow = modelLimits.contextWindow;
-
-	// Filter history, then compact if adding this turn would exceed the threshold.
-	let workingHistory = filterCompatibleMessages(conversationHistory);
-	const preCheckTokens = estimateMessagesTokens([
-		{ role: "system", content: systemPrompt },
-		...workingHistory,
-		{ role: "user", content: userMessage },
-	]);
-
-	if (isOverThreshold(preCheckTokens.total, contextWindow)) {
-		workingHistory = await compactConversation(workingHistory, modelId);
-	}
-
-	// The system prompt is passed to the model via the dedicated `system` option
-	// (below), not embedded in `messages` — embedding it triggers an SDK warning
-	// and is a prompt-injection risk.
-	const messages: ModelMessage[] = [
-		...workingHistory,
+	const limits = provider.limits;
+	const maxSteps = options.maxSteps ?? 40;
+	const maxTokens = options.maxTokens ?? 200000;
+	const maxFailures = options.maxFailures ?? 3;
+	const timeout = AbortSignal.timeout(options.maxTurnMs ?? 600000);
+	const signal = options.signal
+		? AbortSignal.any([options.signal, timeout])
+		: timeout;
+	const schemaCost = schemaTokens(modelTools);
+	let messages: ModelMessage[] = [
+		...filterCompatibleMessages(
+			provider.settings.api === "chat-completions"
+				? portableHistory(conversationHistory)
+				: conversationHistory,
+		),
 		{ role: "user", content: userMessage },
 	];
-
-	let fullResponse = "";
-
-	const appendResponseText = (text: string) => {
-		if (!text) return;
-		fullResponse += fullResponse ? `\n\n${text}` : text;
+	let response = "";
+	let steps = 0;
+	let totalTokens = 0;
+	let completedTools = 0;
+	let outcome: RunOutcome["status"] = "success";
+	let reason = "Completed";
+	let thrown: unknown;
+	const failureCounts = new Map<string, number>();
+	const unresolved = new Set<string>();
+	const checkpoint = async (history: ModelMessage[] = messages) => {
+		await callbacks.onCheckpoint?.(filterCompatibleMessages(history));
 	};
-
-	const reportUsage = (real?: UsageReport) =>
-		reportTokenUsage(callbacks, systemPrompt, messages, contextWindow, real);
-
-	reportUsage();
-
-	while (true) {
-		const result = streamText({
-			model: languageModel,
-			system: systemPrompt,
-			messages,
-			tools: modelTools,
-			...(telemetryEnabled && {
-				experimental_telemetry: {
-					isEnabled: true,
-					// The AI SDK records full prompts/tool args/results onto spans by
-					// default — meaning file contents, shell output, etc. would ship
-					// to Laminar's cloud once LMNR_API_KEY is set. Keep spans (useful
-					// for timing/flow) but not their content, unless explicitly opted
-					// into via TOOLWRIGHT_TELEMETRY_RECORD_IO=1.
-					recordInputs: RECORD_TELEMETRY_IO,
-					recordOutputs: RECORD_TELEMETRY_IO,
-					tracer: getTracer(),
-				},
-			}),
-		});
-
-		const toolCalls: ToolCallInfo[] = [];
-		let currentText = "";
-		let streamError: Error | null = null;
-
-		try {
-			for await (const chunk of result.fullStream) {
+	try {
+		if (!provider.settings.capabilities.streaming)
+			throw new Error(
+				"This profile does not support streaming required by the agent.",
+			);
+		// Text-only sessions prevent the SDK from fetching remote image/file URLs in strict local-only mode.
+		if (
+			provider.settings.localOnly &&
+			messages.some(
+				(m) =>
+					Array.isArray(m.content) &&
+					m.content.some((p) => p.type === "image" || p.type === "file"),
+			)
+		)
+			throw new Error(
+				"Local-only sessions accept text and local tool results; external media inputs are unavailable.",
+			);
+		while (true) {
+			signal.throwIfAborted();
+			if (steps >= maxSteps || totalTokens >= maxTokens) {
+				outcome = "limited";
+				reason =
+					steps >= maxSteps
+						? "Maximum model steps reached"
+						: "Cumulative token budget reached";
+				break;
+			}
+			let instructions = (await workspace?.instructions(signal)) ?? "";
+			const systemPrompt =
+				(options.systemPrompt ??
+					getSystemPrompt(Object.keys(executableTools))) +
+				instructions +
+				`\nPermission mode: ${policy.mode}.\nWorkspace: ${workspace?.root ?? "injected tools"}.\nActual runtime state: ${workspace?.report() ?? "No workspace changes tracked."}`;
+			const cost = () =>
+				estimateMessagesTokens([
+					{ role: "system", content: systemPrompt },
+					...messages,
+				]).total + schemaCost;
+			const inputBudget = Math.min(
+				limits.inputLimit,
+				Math.floor(limits.contextWindow * 0.8),
+			);
+			if (cost() > inputBudget) {
+				messages = await compactConversation(
+					messages,
+					{ ...provider, languageModel },
+					defaultSummarizer(
+						{ ...provider, languageModel },
+						signal,
+						(tokens) => {
+							totalTokens += tokens;
+							if (totalTokens >= maxTokens)
+								throw new TokenBudgetExceeded(
+									"Cumulative token budget reached during compaction.",
+								);
+						},
+						(reserved) => {
+							if (reserved > maxTokens - totalTokens)
+								throw new TokenBudgetExceeded(
+									"Cumulative token budget cannot fit compaction.",
+								);
+						},
+						options.telemetry,
+					),
+					{ includeCurrentTurn: true },
+				);
+				if (cost() > inputBudget) {
+					outcome = "limited";
+					reason =
+						"Context limit: retained intent, instructions, tool schemas and recent state cannot fit. Narrow the task or use a larger context.";
+					break;
+				}
+			}
+			const remainingOutput = maxTokens - totalTokens - cost();
+			if (remainingOutput < 1)
+				throw new TokenBudgetExceeded(
+					"Cumulative token budget cannot fit the next request.",
+				);
+			reportTokenUsage(callbacks, systemPrompt, messages, limits.contextWindow);
+			const result = streamText({
+				model: languageModel,
+				instructions: systemPrompt,
+				messages,
+				tools: modelTools,
+				maxOutputTokens: Math.min(limits.outputLimit, remainingOutput),
+				abortSignal: signal,
+				maxRetries: completedTools > 0 ? 0 : 1,
+				onError: () => {},
+				telemetry: inferenceTelemetry(provider.settings, options.telemetry),
+			});
+			steps++;
+			const toolCalls: ToolCallInfo[] = [];
+			let text = "";
+			for await (const chunk of result.stream) {
+				signal.throwIfAborted();
+				if (chunk.type === "error") throw chunk.error;
 				if (chunk.type === "text-delta") {
-					currentText += chunk.text;
+					text += chunk.text;
 					callbacks.onToken(chunk.text);
 				}
-
-				if (chunk.type === "tool-call") {
-					const input = "input" in chunk ? chunk.input : {};
+				if (chunk.type === "tool-call" && !chunk.providerExecuted) {
+					const args =
+						chunk.input && typeof chunk.input === "object"
+							? (chunk.input as Record<string, unknown>)
+							: {};
 					toolCalls.push({
 						toolCallId: chunk.toolCallId,
 						toolName: chunk.toolName,
-						args: input as Record<string, unknown>,
+						args,
 					});
-					callbacks.onToolCallStart(chunk.toolName, input, chunk.toolCallId);
+					callbacks.onToolCallStart(chunk.toolName, args, chunk.toolCallId);
 				}
 			}
-		} catch (error) {
-			streamError = error as Error;
-			// Rethrow only if we got nothing usable and it isn't the benign
-			// "no output generated" case we know how to recover from.
-			if (
-				!currentText &&
-				!streamError.message.includes("No output generated")
-			) {
-				throw streamError;
+			const finishReason = await result.finishReason;
+			messages.push(...(await result.response).messages);
+			response += text ? (response ? "\n\n" : "") + text : "";
+			const usage = await result.usage;
+			totalTokens +=
+				usage.totalTokens ??
+				estimateMessagesTokens([
+					{ role: "system", content: systemPrompt },
+					...messages,
+				]).total;
+			reportTokenUsage(
+				callbacks,
+				systemPrompt,
+				messages,
+				limits.contextWindow,
+				usage,
+			);
+			if (!toolCalls.length) {
+				if (finishReason === "error" || finishReason === "other") {
+					outcome = "failed";
+					reason = `Model stopped with ${finishReason} finish reason`;
+				}
+				if (finishReason === "length") {
+					outcome = "limited";
+					reason = "Model output limit reached";
+				}
+				break;
 			}
-		}
-
-		// If the stream errored, end the turn gracefully: keep whatever text we
-		// have (or a fallback) and record it in history so the UI and the model
-		// see the same thing. Awaiting finishReason/response here could reject.
-		if (streamError) {
-			const text = currentText || NO_RESPONSE_FALLBACK;
-			if (!currentText) {
-				callbacks.onToken(text);
+			// Refresh guidance discovered from tool paths before the next request. Mutations wait for the model to see it.
+			instructions = (await workspace?.instructions(signal)) ?? instructions;
+			const resolved = await resolveToolCalls(
+				toolCalls,
+				executableTools,
+				messages,
+				callbacks,
+				(current) =>
+					reportTokenUsage(
+						callbacks,
+						systemPrompt,
+						current,
+						limits.contextWindow,
+					),
+				{
+					policy,
+					workspace,
+					signal,
+					maxChars: Math.min(
+						12000,
+						Math.max(256, Math.floor(inputBudget * 0.8)),
+					),
+					instructionContext: instructions,
+				},
+			);
+			messages.push(...resolved.toolMessages);
+			signal.throwIfAborted();
+			completedTools += toolCalls.length;
+			for (const call of toolCalls) {
+				if (resolved.failures.includes(call.toolName)) {
+					unresolved.add(call.toolName);
+					const key = JSON.stringify([call.toolName, call.args]);
+					failureCounts.set(key, (failureCounts.get(key) ?? 0) + 1);
+				} else {
+					unresolved.delete(call.toolName);
+					failureCounts.delete(JSON.stringify([call.toolName, call.args]));
+				}
 			}
-			appendResponseText(text);
-			messages.push({ role: "assistant", content: text });
-			reportUsage();
-			break;
+			if (resolved.rejected) {
+				outcome = "approval-blocked";
+				reason = "A required tool was denied by policy or user approval";
+				break;
+			}
+			if ([...failureCounts.values()].some((count) => count >= maxFailures)) {
+				outcome = "limited";
+				reason = "Repeated identical tool failures";
+				break;
+			}
+			await checkpoint();
 		}
-
-		appendResponseText(currentText);
-
-		const finishReason = await result.finishReason;
-		const responseMessages = await result.response;
-		messages.push(...responseMessages.messages);
-		reportUsage(await result.usage);
-
-		if (finishReason !== "tool-calls" || toolCalls.length === 0) {
-			break;
-		}
-
-		const { toolMessages, rejected } = await resolveToolCalls(
-			toolCalls,
-			executableTools,
-			messages,
-			callbacks,
-			(current) =>
-				reportTokenUsage(callbacks, systemPrompt, current, contextWindow),
-		);
-		messages.push(...toolMessages);
-
-		if (rejected) {
-			break;
+	} catch (error) {
+		if (signal.aborted) {
+			outcome =
+				timeout.aborted && !options.signal?.aborted ? "limited" : "cancelled";
+			reason =
+				outcome === "limited" ? "Turn time limit reached" : "Cancelled by user";
+		} else if (error instanceof TokenBudgetExceeded) {
+			outcome = "limited";
+			reason = error.message;
+		} else {
+			outcome = "failed";
+			reason = error instanceof Error ? error.message : String(error);
+			thrown = error;
 		}
 	}
-
-	callbacks.onComplete(fullResponse);
-
-	// Return history without the system prompt; runAgent re-adds it next turn.
-	return messages.filter((m) => m.role !== "system");
+	if (outcome === "success" && unresolved.size) {
+		outcome = "failed";
+		reason = `Unresolved tool failures: ${[...unresolved].join(", ")}`;
+	}
+	if (outcome === "success" && workspace) {
+		const latest = new Map(
+			workspace.commands.map((command) => [command.command, command]),
+		);
+		if (
+			[...latest.values()].some(
+				(command) =>
+					command.exitCode !== 0 || command.timedOut || command.overflowed,
+			)
+		) {
+			outcome = "failed";
+			reason = "An executed command/check has an unresolved failure";
+		}
+	}
+	messages = filterCompatibleMessages(messages);
+	await callbacks.onOutcome?.({
+		status: outcome,
+		reason,
+		steps,
+		totalTokens,
+		durationMs: Date.now() - started,
+	});
+	await checkpoint();
+	const report = workspace?.report();
+	const finalText =
+		response +
+		(outcome !== "success" ? `\n\nStopped: ${reason}` : "") +
+		(report ? `\n\n${report}` : "");
+	callbacks.onComplete(finalText);
+	if (thrown) throw thrown;
+	return messages;
 }

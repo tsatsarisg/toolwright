@@ -1,6 +1,8 @@
-import { generateText, type ModelMessage, stepCountIs, type ToolSet } from "ai";
-import { DEFAULT_MODEL, resolveModel } from "../src/agent/model.ts";
-import { SYSTEM_PROMPT } from "../src/agent/system/prompt.ts";
+import { generateText, isStepCount, type ModelMessage, type ToolSet } from "ai";
+import { resolveProvider } from "../src/agent/model.ts";
+import { getSystemPrompt } from "../src/agent/system/prompt.ts";
+import { inferenceTelemetry } from "../src/agent/telemetry.ts";
+import { selectProviderTools } from "../src/agent/tools/index.ts";
 import type {
 	EvalData,
 	MultiTurnEvalData,
@@ -13,7 +15,8 @@ export async function singleTurnExecutor(
 	data: EvalData,
 	availableTools: ToolSet,
 ): Promise<SingleTurnResult> {
-	const { system, messages } = buildMessages(data);
+	const { messages } = buildMessages(data);
+	const provider = resolveProvider(data.config);
 
 	// Filter to only tools specified in data
 	const tools: ToolSet = {};
@@ -24,18 +27,24 @@ export async function singleTurnExecutor(
 	}
 
 	const result = await generateText({
-		model: resolveModel(data.config?.model ?? DEFAULT_MODEL),
-		system,
+		model: provider.languageModel,
+		telemetry: inferenceTelemetry(provider.settings),
+		maxOutputTokens: provider.limits.outputLimit,
+		instructions:
+			data.systemPrompt ??
+			getSystemPrompt(
+				Object.keys(selectProviderTools(provider.settings, tools)),
+			),
 		messages,
-		tools,
-		stopWhen: stepCountIs(1), // Single step - just get tool selection
+		tools: selectProviderTools(provider.settings, tools),
+		stopWhen: isStepCount(1), // Single step - just get tool selection
 		temperature: data.config?.temperature ?? undefined,
 	});
 
 	// Extract tool calls from the result
 	const toolCalls = (result.toolCalls ?? []).map((tc) => ({
 		toolName: tc.toolName,
-		args: "args" in tc ? tc.args : {},
+		args: tc.input,
 	}));
 
 	const toolNames = toolCalls.map((tc) => tc.toolName);
@@ -54,11 +63,15 @@ export async function singleTurnExecutor(
 export async function multiTurnWithMocks(
 	data: MultiTurnEvalData,
 ): Promise<MultiTurnResult> {
-	const tools = buildMockedTools(data.mockTools);
+	const provider = resolveProvider(data.config);
+	const tools = selectProviderTools(
+		provider.settings,
+		buildMockedTools(data.mockTools),
+	);
 
 	// Separate the system prompt from the conversation so it can be passed via
-	// the `system` option rather than embedded in `messages`.
-	let system = SYSTEM_PROMPT;
+	// the `instructions` option rather than embedded in `messages`.
+	let system = getSystemPrompt(Object.keys(tools));
 	let messages: ModelMessage[];
 	if (data.messages) {
 		const systemMessage = data.messages.find((m) => m.role === "system");
@@ -67,15 +80,19 @@ export async function multiTurnWithMocks(
 		}
 		messages = data.messages.filter((m) => m.role !== "system");
 	} else {
-		messages = [{ role: "user", content: data.prompt! }];
+		if (data.prompt === undefined)
+			throw new Error("Evaluation requires a prompt or messages.");
+		messages = [{ role: "user", content: data.prompt }];
 	}
 
 	const result = await generateText({
-		model: resolveModel(data.config?.model ?? DEFAULT_MODEL),
-		system,
+		model: provider.languageModel,
+		telemetry: inferenceTelemetry(provider.settings),
+		maxOutputTokens: provider.limits.outputLimit,
+		instructions: system,
 		messages,
 		tools,
-		stopWhen: stepCountIs(data.config?.maxSteps ?? 20),
+		stopWhen: isStepCount(data.config?.maxSteps ?? 20),
 	});
 
 	// Extract all tool calls in order from steps
@@ -85,13 +102,13 @@ export async function multiTurnWithMocks(
 			allToolCalls.push(tc.toolName);
 			return {
 				toolName: tc.toolName,
-				args: "args" in tc ? tc.args : {},
+				args: tc.input,
 			};
 		});
 
 		const stepToolResults = (step.toolResults ?? []).map((tr) => ({
 			toolName: tr.toolName,
-			result: "result" in tr ? tr.result : tr,
+			result: tr.output,
 		}));
 
 		return {
@@ -105,6 +122,10 @@ export async function multiTurnWithMocks(
 	const toolsUsed = [...new Set(allToolCalls)];
 
 	return {
+		providerSelection: {
+			profile: provider.settings.profile,
+			model: provider.settings.model,
+		},
 		text: result.text,
 		steps,
 		toolsUsed,

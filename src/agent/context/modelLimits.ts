@@ -7,11 +7,16 @@ export const DEFAULT_THRESHOLD = 0.8;
 
 /**
  * Model limits registry
- * Currently only includes GPT-5 models. `getModelLimits` falls back to this
- * entry for any "gpt-5*" variant (e.g. "gpt-5-mini") via startsWith, so
- * variants don't need their own entry unless their limits actually differ.
+ * GPT-6 Luna uses its documented context/output limits and keeps input below
+ * the 272K threshold for higher long-context pricing. GPT-5 variants share
+ * the legacy family entry unless an exact model entry overrides it.
  */
 const MODEL_LIMITS: Record<string, ModelLimits> = {
+	"gpt-6-luna": {
+		inputLimit: 272000,
+		outputLimit: 128000,
+		contextWindow: 1050000,
+	},
 	"gpt-5": {
 		inputLimit: 272000,
 		outputLimit: 128000,
@@ -23,9 +28,9 @@ const MODEL_LIMITS: Record<string, ModelLimits> = {
  * Default limits used when model is not found in registry
  */
 const DEFAULT_LIMITS: ModelLimits = {
-	inputLimit: 128000,
-	outputLimit: 16000,
-	contextWindow: 128000,
+	inputLimit: 6144,
+	outputLimit: 2048,
+	contextWindow: 8192,
 };
 
 /**

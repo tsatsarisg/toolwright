@@ -1,109 +1,142 @@
 import { spawn } from "node:child_process";
 import { tool } from "ai";
 import { z } from "zod";
+import type { CommandResult } from "../../types.ts";
+import { markTool } from "../policy.ts";
+import type { Workspace } from "../workspace.ts";
 import { truncateOutput } from "./truncate.ts";
 
-/** Kill a command that runs longer than this so it can't hang the agent. */
-const COMMAND_TIMEOUT_MS = 60_000;
-/** Cap on captured bytes; the model-facing output is truncated separately. */
-const MAX_BUFFER = 10 * 1024 * 1024;
-
-interface RunResult {
-	stdout: string;
-	stderr: string;
-	code: number | null;
-	timedOut: boolean;
-}
-
-/**
- * Kill a command's whole process group, not just the direct child.
- *
- * A plain child.kill() only signals the immediate child; a command that
- * backgrounds work (`nohup ... &`, `disown`, `setsid ...`) detaches its
- * children from that process, so they'd survive a timeout otherwise.
- * Spawning detached makes the child the leader of a new process group (its
- * pid IS the group id), so kill(-pid, signal) reaches the whole tree —
- * verified directly: a plain child.kill() leaves a backgrounded grandchild
- * running, this does not.
- */
-function killProcessGroup(pid: number): void {
+function signalProcess(pid: number, signal: NodeJS.Signals): void {
 	try {
-		process.kill(-pid, "SIGTERM");
+		process.kill(process.platform === "win32" ? pid : -pid, signal);
 	} catch {
 		try {
-			process.kill(pid, "SIGTERM");
+			process.kill(pid, signal);
 		} catch {
-			// Already dead.
+			/* Already exited. */
 		}
 	}
 }
-
-function runShellCommand(command: string): Promise<RunResult> {
+export async function runShellCommand(
+	command: string,
+	options: {
+		cwd: string;
+		signal?: AbortSignal;
+		timeoutMs?: number;
+		maxOutputChars?: number;
+		onOutput?: (text: string) => void;
+	},
+): Promise<CommandResult> {
+	options.signal?.throwIfAborted();
 	return new Promise((resolve) => {
-		const child = spawn(command, { shell: true, detached: true });
-
+		const started = Date.now();
+		const child = spawn(command, {
+			cwd: options.cwd,
+			shell: true,
+			detached: process.platform !== "win32",
+		});
 		let stdout = "";
 		let stderr = "";
 		let timedOut = false;
+		let cancelled = false;
 		let overflowed = false;
-
-		const collect = (target: "stdout" | "stderr") => (chunk: Buffer) => {
-			if (overflowed) return;
-			const next =
-				(target === "stdout" ? stdout : stderr) + chunk.toString("utf-8");
-			if (next.length > MAX_BUFFER) {
-				overflowed = true;
-				if (child.pid) killProcessGroup(child.pid);
-			}
-			if (target === "stdout") stdout = next;
-			else stderr = next;
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		const kill = () => {
+			if (!child.pid) return;
+			signalProcess(child.pid, "SIGTERM");
+			killTimer ??= setTimeout(() => {
+				if (child.pid) signalProcess(child.pid, "SIGKILL");
+			}, 250);
 		};
-
-		child.stdout?.on("data", collect("stdout"));
-		child.stderr?.on("data", collect("stderr"));
-
+		const abort = () => {
+			cancelled = true;
+			kill();
+		};
+		options.signal?.addEventListener("abort", abort, { once: true });
+		if (options.signal?.aborted) abort();
 		const timer = setTimeout(() => {
 			timedOut = true;
-			if (child.pid) killProcessGroup(child.pid);
-		}, COMMAND_TIMEOUT_MS);
-
-		const finish = (code: number | null) => {
-			clearTimeout(timer);
-			resolve({ stdout, stderr, code, timedOut });
+			kill();
+		}, options.timeoutMs ?? 60000);
+		const collect = (kind: "stdout" | "stderr") => (data: Buffer) => {
+			const remaining =
+				(options.maxOutputChars ?? 16000) - stdout.length - stderr.length;
+			if (remaining <= 0) {
+				overflowed = true;
+				kill();
+				return;
+			}
+			const text = data.toString("utf-8").slice(0, remaining);
+			if (kind === "stdout") stdout += text;
+			else stderr += text;
+			options.onOutput?.(text);
+			if (data.length > remaining) {
+				overflowed = true;
+				kill();
+			}
 		};
-
+		child.stdout?.on("data", collect("stdout"));
+		child.stderr?.on("data", collect("stderr"));
+		let finished = false;
+		const finish = (exitCode: number | null) => {
+			if (finished) return;
+			finished = true;
+			clearTimeout(timer);
+			if (killTimer) {
+				clearTimeout(killTimer);
+				// The shell can exit while a detached descendant ignores SIGTERM.
+				if (child.pid) signalProcess(child.pid, "SIGKILL");
+			}
+			options.signal?.removeEventListener("abort", abort);
+			resolve({
+				command,
+				cwd: options.cwd,
+				stdout,
+				stderr,
+				exitCode,
+				timedOut,
+				cancelled,
+				overflowed,
+				durationMs: Date.now() - started,
+			});
+		};
 		child.on("close", finish);
-		child.on("error", () => finish(null));
+		child.on("error", (error) => {
+			stderr += error.message;
+			finish(null);
+		});
 	});
 }
-
-/**
- * Run a shell command asynchronously.
- *
- * Uses child_process.spawn (not the synchronous shelljs) so a long-running
- * command never blocks the event loop and freezes the Ink UI. Output is
- * truncated so a noisy command can't overflow the context window.
- */
-export const runCommand = tool({
-	description:
-		"Execute a shell command and return its output. Use this for system operations, running scripts, or interacting with the operating system.",
-	inputSchema: z.object({
-		command: z.string().describe("The shell command to execute"),
-	}),
-	execute: async ({ command }: { command: string }) => {
-		const { stdout, stderr, code, timedOut } = await runShellCommand(command);
-		const output = truncateOutput(`${stdout}${stderr}`);
-
-		if (timedOut) {
-			return `Command timed out after ${COMMAND_TIMEOUT_MS / 1000}s${
-				output ? `:\n${output}` : ""
-			}`;
-		}
-
-		if (code === 0) {
-			return output || "Command completed successfully (no output)";
-		}
-
-		return `Command failed (exit code ${code ?? "unknown"}):\n${output}`;
-	},
-});
+export function createShellTools(
+	workspace?: Workspace,
+	onOutput?: (text: string) => void,
+) {
+	return {
+		runCommand: markTool(
+			tool({
+				description:
+					"Execute an approved host shell command in the workspace. This is not sandboxed. Returns output and structured exit/timeout status.",
+				inputSchema: z.object({
+					command: z.string(),
+					timeoutMs: z.number().int().min(1).max(600000).default(60000),
+				}),
+				execute: async ({ command, timeoutMs }, options) => {
+					const result = await runShellCommand(command, {
+						cwd: workspace?.root ?? process.cwd(),
+						signal: options.abortSignal,
+						timeoutMs,
+						onOutput,
+					});
+					workspace?.commands.push(result);
+					return JSON.stringify({
+						...result,
+						stdout: truncateOutput(result.stdout),
+						stderr: truncateOutput(result.stderr),
+					});
+				},
+			}),
+			"shell",
+		),
+	};
+}
+export const { runCommand } = createShellTools();

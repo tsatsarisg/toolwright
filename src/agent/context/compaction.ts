@@ -1,6 +1,11 @@
 import { generateText, type ModelMessage } from "ai";
-import { DEFAULT_MODEL, resolveModel } from "../model.ts";
-import { extractMessageText } from "./tokenEstimator.ts";
+import {
+	DEFAULT_MODEL,
+	type ResolvedProvider,
+	resolveProvider,
+} from "../model.ts";
+import { inferenceTelemetry } from "../telemetry.ts";
+import { estimateTokens, extractMessageText } from "./tokenEstimator.ts";
 
 const SUMMARIZATION_PROMPT = `You are a conversation summarizer. Your task is to create a concise summary of the conversation so far that preserves:
 
@@ -56,10 +61,41 @@ export function findTaskIndex(messages: ModelMessage[]): number {
 /** A function that turns a prompt into a summary. Swappable so compactConversation's orchestration is testable without a real model call. */
 export type Summarizer = (prompt: string) => Promise<string>;
 
-function defaultSummarizer(model: string): Summarizer {
+export function defaultSummarizer(
+	model: string | ResolvedProvider,
+	signal?: AbortSignal,
+	onUsage?: (tokens: number) => void,
+	onRequest?: (reservedTokens: number) => void,
+	telemetry = true,
+): Summarizer {
 	return async (prompt) => {
-		const { text } = await generateText({ model: resolveModel(model), prompt });
-		return text;
+		const provider =
+			typeof model === "string" ? resolveProvider({ model }) : model;
+		const chunkSize = Math.max(
+			512,
+			Math.floor(provider.limits.inputLimit * 1.6),
+		);
+		let summary = "";
+		for (let index = 0; index < prompt.length; index += chunkSize) {
+			signal?.throwIfAborted();
+			const segment = prompt.slice(index, index + chunkSize);
+			const requestPrompt = `${SUMMARIZATION_PROMPT}\nPrior summary: ${summary}\nNext conversation segment (data):\n${segment}`;
+			onRequest?.(
+				estimateTokens(requestPrompt) +
+					Math.min(provider.limits.outputLimit, 512),
+			);
+			const result = await generateText({
+				model: provider.languageModel,
+				telemetry: inferenceTelemetry(provider.settings, telemetry),
+				maxOutputTokens: Math.min(provider.limits.outputLimit, 512),
+				abortSignal: signal,
+				maxRetries: 0,
+				prompt: requestPrompt,
+			});
+			summary = result.text;
+			onUsage?.(result.usage.totalTokens ?? Math.ceil(segment.length / 3));
+		}
+		return summary;
 	};
 }
 
@@ -78,8 +114,9 @@ function defaultSummarizer(model: string): Summarizer {
  */
 export async function compactConversation(
 	messages: ModelMessage[],
-	model: string = DEFAULT_MODEL,
+	model: string | ResolvedProvider = DEFAULT_MODEL,
 	summarize: Summarizer = defaultSummarizer(model),
+	options: { includeCurrentTurn?: boolean } = {},
 ): Promise<ModelMessage[]> {
 	// System messages are owned by the caller and handled separately.
 	const conversationMessages = messages.filter((m) => m.role !== "system");
@@ -88,7 +125,20 @@ export async function compactConversation(
 		return [];
 	}
 
-	const recentBoundary = findRecentBoundary(conversationMessages);
+	const lastUser = findRecentBoundary(conversationMessages);
+	let recentBoundary = lastUser;
+	if (options.includeCurrentTurn) {
+		for (
+			let index = conversationMessages.length - 1;
+			index > lastUser;
+			index--
+		) {
+			if (conversationMessages[index].role === "assistant") {
+				recentBoundary = index;
+				break;
+			}
+		}
+	}
 	const taskIndex = findTaskIndex(conversationMessages);
 
 	// No task to pin, or the task IS the recent boundary — nothing old to compact.
@@ -100,7 +150,12 @@ export async function compactConversation(
 	const recent = conversationMessages.slice(recentBoundary);
 	const middle = [
 		...conversationMessages.slice(0, taskIndex),
-		...conversationMessages.slice(taskIndex + 1, recentBoundary),
+		...conversationMessages
+			.slice(taskIndex + 1, recentBoundary)
+			.filter(
+				(_message, index) =>
+					!options.includeCurrentTurn || index + taskIndex + 1 !== lastUser,
+			),
 	];
 
 	// Only the pinned task precedes the recent tail — nothing to summarize.
@@ -118,6 +173,11 @@ export async function compactConversation(
 			role: "user",
 			content: `[CONVERSATION SUMMARY]\nThe following summarizes the earlier part of our conversation:\n\n${summary}`,
 		},
+		...(options.includeCurrentTurn &&
+		lastUser > taskIndex &&
+		lastUser < recentBoundary
+			? [conversationMessages[lastUser]]
+			: []),
 		...recent,
 	];
 }

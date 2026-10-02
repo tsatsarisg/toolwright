@@ -1,13 +1,17 @@
-import type { ToolSet } from "ai";
+import type { ToolSet } from "@ai-sdk/provider-utils";
+import type { ProviderSettings } from "../config.ts";
+import type { Workspace } from "../workspace.ts";
 import {
+	createFileTools,
 	deleteFile,
 	editFile,
 	listFiles,
 	readFile,
 	writeFile,
 } from "./file.ts";
-import { globFiles, searchCode } from "./search.ts";
-import { runCommand } from "./shell.ts";
+import { createGitTools } from "./git.ts";
+import { createSearchTools, globFiles, searchCode } from "./search.ts";
+import { createShellTools, runCommand } from "./shell.ts";
 import { webSearch } from "./webSearch.ts";
 
 // All tools combined for the agent (with executable `execute` functions).
@@ -23,6 +27,51 @@ export const tools = {
 	webSearch,
 };
 
+export function createTools(
+	workspace: Workspace,
+	onOutput?: (text: string) => void,
+): ToolSet {
+	return {
+		...createFileTools(workspace),
+		...createSearchTools(workspace),
+		...createShellTools(workspace, onOutput),
+		...createGitTools(workspace),
+		webSearch,
+	};
+}
+
+const LOCAL_TOOLS = new Set([
+	"gitStatus",
+	"gitDiff",
+	"readFile",
+	"writeFile",
+	"editFile",
+	"listFiles",
+	"deleteFile",
+	"globFiles",
+	"searchCode",
+]);
+
+/** Apply provider capabilities and hard local-only denials before advertising or executing tools. */
+export function selectProviderTools(
+	settings: ProviderSettings,
+	toolSet: ToolSet = tools,
+): ToolSet {
+	if (!settings.capabilities.tools) return {};
+	return Object.fromEntries(
+		Object.entries(toolSet).filter(([name, definition]) => {
+			if (
+				settings.localOnly &&
+				(!LOCAL_TOOLS.has(name) || definition.type === "provider")
+			)
+				return false;
+			if (definition.type === "provider")
+				return name === "webSearch" && settings.capabilities.hostedWebSearch;
+			return name !== "webSearch" || settings.capabilities.hostedWebSearch;
+		}),
+	);
+}
+
 /**
  * Model-facing view of a toolset: same schemas, but with `execute` stripped.
  *
@@ -36,7 +85,7 @@ export function toModelTools(toolSet: ToolSet): ToolSet {
 	return Object.fromEntries(
 		Object.entries(toolSet).map(([name, t]) => [
 			name,
-			t.type === "provider-defined" ? t : { ...t, execute: undefined },
+			t.type === "provider" ? t : { ...t, execute: undefined },
 		]),
 	);
 }
@@ -58,8 +107,7 @@ export const shellTools = {
 };
 
 /**
- * Tools with no side effects — safe to run without interactive approval.
- * Checked by name in run.ts's tool-call loop.
+ * Legacy names for consumers; runtime authorization uses registered metadata.
  */
 export const READ_ONLY_TOOLS = new Set<string>([
 	"readFile",

@@ -1,6 +1,7 @@
-import { openai } from "@ai-sdk/openai";
-import { generateObject } from "ai";
+import { generateText, Output } from "ai";
 import { z } from "zod";
+import { resolveProvider } from "../src/agent/model.ts";
+import { inferenceTelemetry } from "../src/agent/telemetry.ts";
 
 import type {
 	EvalTarget,
@@ -115,17 +116,17 @@ export async function llmJudge(
 	output: MultiTurnResult,
 	target: MultiTurnTarget,
 ): Promise<number> {
-	const result = await generateObject({
-		model: openai("gpt-5.1"),
-		schema: judgeSchema,
-		schemaName: "evaluation",
-		providerOptions: {
-			openai: {
-				reasoningEffort: "high",
-			},
-		},
-		schemaDescription: "Evaluation of an AI agent response",
-		system: `You are an evaluation judge. Score the agent's response on a scale of 1-10.
+	const provider = resolveProvider(output.providerSelection);
+	const result = await generateText({
+		model: provider.languageModel,
+		telemetry: inferenceTelemetry(provider.settings),
+		maxOutputTokens: provider.limits.outputLimit,
+		output: Output.object({
+			schema: judgeSchema,
+			name: "evaluation",
+			description: "Evaluation of an AI agent response",
+		}),
+		instructions: `You are an evaluation judge. Score the agent's response on a scale of 1-10.
 
 Scoring criteria:
 - 10: Response fully addresses the task using tool results correctly
@@ -149,5 +150,5 @@ Evaluate if this response correctly uses the tool results to answer the task.`,
 	});
 
 	// Convert 1-10 score to 0-1 range
-	return result.object.score / 10;
+	return result.output.score / 10;
 }

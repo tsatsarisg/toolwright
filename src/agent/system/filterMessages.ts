@@ -1,5 +1,34 @@
 import type { ModelMessage } from "ai";
 
+/** Common text/tool history for switching models or API protocols. */
+export function portableHistory(messages: ModelMessage[]): ModelMessage[] {
+	return filterCompatibleMessages(
+		messages.map((message) => {
+			const { providerOptions: _options, ...clean } = message;
+			if (!Array.isArray(message.content)) return clean as ModelMessage;
+			const content = message.content
+				.filter((part) => {
+					const view = part as { type: string; providerExecuted?: boolean };
+					if (message.role === "assistant")
+						return (
+							["text", "tool-call"].includes(view.type) &&
+							!view.providerExecuted
+						);
+					return true;
+				})
+				.map((part) => {
+					const {
+						providerOptions: _partOptions,
+						providerMetadata: _metadata,
+						...value
+					} = part as unknown as Record<string, unknown>;
+					return value;
+				});
+			return { ...clean, content } as unknown as ModelMessage;
+		}),
+	);
+}
+
 /** Loose view of a content part; the SDK's union types don't expose every
  * field on every member, so we read fields defensively through this. */
 type LoosePart = { type?: string; toolCallId?: string; text?: string };

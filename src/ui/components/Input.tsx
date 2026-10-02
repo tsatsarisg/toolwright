@@ -1,4 +1,4 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, usePaste } from "ink";
 import { useState } from "react";
 
 interface InputProps {
@@ -8,11 +8,18 @@ interface InputProps {
 
 export function Input({ onSubmit, disabled = false }: InputProps) {
 	const [value, setValue] = useState("");
+	usePaste((text) => {
+		if (!disabled) setValue((prev) => prev + text.replace(/\r\n?/g, "\n"));
+	});
 
 	useInput((input, key) => {
 		if (disabled) return;
 
 		if (key.return) {
+			if (key.shift || key.meta) {
+				setValue((prev) => `${prev}\n`);
+				return;
+			}
 			if (value.trim()) {
 				onSubmit(value);
 				setValue("");
@@ -26,7 +33,7 @@ export function Input({ onSubmit, disabled = false }: InputProps) {
 		}
 
 		if (input && !key.ctrl && !key.meta) {
-			setValue((prev) => prev + input);
+			setValue((prev) => prev + input.replace(/\r\n?/g, "\n"));
 		}
 	});
 

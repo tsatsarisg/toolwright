@@ -1,217 +1,194 @@
-import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { tool } from "ai";
 import { z } from "zod";
+import { markTool } from "../policy.ts";
+import { Workspace } from "../workspace.ts";
 import { truncateOutput } from "./truncate.ts";
 
-const IGNORE_DIRS = new Set([
-	"node_modules",
-	".git",
-	"dist",
-	"build",
-	"out",
-	".next",
-	".turbo",
-	"coverage",
-]);
-
-/** A NUL byte never appears in real text; its presence is the standard binary-file heuristic. */
-const NUL_CHAR = String.fromCharCode(0);
-
-const REGEX_SPECIAL_CHARS = new Set([
-	".",
-	"+",
-	"^",
-	"$",
-	"{",
-	"}",
-	"(",
-	")",
-	"|",
-	"[",
-	"]",
-	"\\",
-]);
-
-/** Hard cap on files visited per call, so a huge tree can't hang the tool. */
-const MAX_FILES_VISITED = 20_000;
-/** Hard cap on results returned, so a broad pattern can't blow the context window. */
-const MAX_RESULTS = 200;
-
-/**
- * Translate a small glob subset (`*`, `**`, `?`) into a RegExp matched
- * against a POSIX-style relative path. Not a full glob implementation —
- * enough for the common "src/**\/*.ts" / "*.json" cases an agent needs.
- */
-function globToRegExp(glob: string): RegExp {
-	let out = "";
+export function globToRegExp(glob: string): RegExp {
+	let pattern = "";
 	for (let i = 0; i < glob.length; i++) {
 		const c = glob[i];
-		if (c === "*") {
-			if (glob[i + 1] === "*") {
-				out += ".*";
+		if (c === "*" && glob[i + 1] === "*") {
+			i++;
+			if (glob[i + 1] === "/") {
 				i++;
-				if (glob[i + 1] === "/") i++;
-			} else {
-				out += "[^/]*";
-			}
-		} else if (c === "?") {
-			out += "[^/]";
-		} else if (REGEX_SPECIAL_CHARS.has(c)) {
-			out += `\\${c}`;
-		} else {
-			out += c;
-		}
+				pattern += "(?:.*/)?";
+			} else pattern += ".*";
+		} else if (c === "*") pattern += "[^/]*";
+		else if (c === "?") pattern += "[^/]";
+		else pattern += /[.+^${}()|[\]\\]/.test(c) ? `\\${c}` : c;
 	}
-	return new RegExp(`^${out}$`);
+	return new RegExp(`^${pattern}$`);
 }
-
-/**
- * Recursively walk `dir`, calling `onFile` for every file (skipping
- * node_modules/.git/build output and dotfiles/dotdirs). `onFile` returning
- * `false` stops the walk early once a caller has enough results.
- */
-async function walk(
+const SKIP = new Set([
+	".git",
+	".toolwright",
+	"node_modules",
+	"dist",
+	"build",
+	"coverage",
+]);
+type IgnoreRule = { base: string; regex: RegExp; negate: boolean };
+async function ignoreRules(
 	dir: string,
-	onFile: (filePath: string) => Promise<boolean | undefined>,
-	state: { visited: number } = { visited: 0 },
-): Promise<boolean> {
-	let entries: Dirent[];
-	try {
-		entries = await fs.readdir(dir, { withFileTypes: true });
-	} catch {
-		return true; // unreadable directory — skip it, keep walking siblings
-	}
-
-	for (const entry of entries) {
-		if (state.visited >= MAX_FILES_VISITED) return false;
-
-		if (entry.isDirectory()) {
-			if (entry.name.startsWith(".") || IGNORE_DIRS.has(entry.name)) continue;
-			const keepGoing = await walk(path.join(dir, entry.name), onFile, state);
-			if (!keepGoing) return false;
-		} else if (entry.isFile()) {
-			state.visited++;
-			const result = await onFile(path.join(dir, entry.name));
-			if (result === false) return false;
-		}
-	}
-	return true;
-}
-
-/**
- * Recursively find files whose relative path matches a glob pattern.
- */
-export const globFiles = tool({
-	description:
-		"Recursively find files under a directory whose relative path matches a glob pattern (e.g. 'src/**/*.ts', '*.json'). Skips node_modules, .git, and common build output directories. Use this instead of chaining many listFiles calls to explore a codebase.",
-	inputSchema: z.object({
-		pattern: z
-			.string()
-			.describe("Glob pattern to match, relative to `directory`"),
-		directory: z.string().default(".").describe("Directory to search from"),
-	}),
-	execute: async ({
-		pattern,
-		directory,
-	}: {
-		pattern: string;
-		directory: string;
-	}) => {
+	names: string[],
+): Promise<IgnoreRule[]> {
+	const result: IgnoreRule[] = [];
+	for (const name of names) {
+		let text: string;
 		try {
-			const root = path.resolve(directory);
-			const regex = globToRegExp(pattern);
-			const matches: string[] = [];
-
-			await walk(root, async (filePath) => {
-				const rel = path.relative(root, filePath);
-				if (regex.test(rel)) matches.push(rel);
-				return matches.length < MAX_RESULTS;
-			});
-
-			if (matches.length === 0) {
-				return `No files matched "${pattern}" under ${directory}`;
-			}
-			matches.sort();
-			const truncatedNotice =
-				matches.length >= MAX_RESULTS
-					? `\n\n[... stopped at ${MAX_RESULTS} matches, narrow the pattern for more]`
-					: "";
-			return matches.join("\n") + truncatedNotice;
-		} catch (error) {
-			const err = error as NodeJS.ErrnoException;
-			return `Error searching for files: ${err.message}`;
-		}
-	},
-});
-
-/**
- * Recursively grep file contents for a regular expression.
- */
-export const searchCode = tool({
-	description:
-		"Search file contents recursively for a regular expression (JavaScript regex syntax), returning matching lines as 'path:line: text'. Skips node_modules, .git, build output, and binary-looking files. Use this instead of runCommand for grep-style searches — it doesn't need shell approval.",
-	inputSchema: z.object({
-		pattern: z.string().describe("Regular expression to search for"),
-		directory: z.string().default(".").describe("Directory to search from"),
-		filePattern: z
-			.string()
-			.optional()
-			.describe(
-				"Optional glob to restrict which files are searched, e.g. '*.ts'",
-			),
-	}),
-	execute: async ({
-		pattern,
-		directory,
-		filePattern,
-	}: {
-		pattern: string;
-		directory: string;
-		filePattern?: string;
-	}) => {
-		let regex: RegExp;
-		try {
-			regex = new RegExp(pattern);
+			text = await fs.readFile(path.join(dir, name), "utf-8");
 		} catch {
-			return `Error: "${pattern}" is not a valid regular expression.`;
+			continue;
 		}
-
-		try {
-			const root = path.resolve(directory);
-			const fileRegex = filePattern ? globToRegExp(filePattern) : null;
-			const results: string[] = [];
-
-			await walk(root, async (filePath) => {
-				const rel = path.relative(root, filePath);
-				if (fileRegex && !fileRegex.test(rel)) return true;
-
-				let content: string;
-				try {
-					content = await fs.readFile(filePath, "utf-8");
-				} catch {
-					return true; // unreadable — skip
-				}
-				if (content.includes(NUL_CHAR)) return true; // binary file — skip
-
-				const lines = content.split("\n");
-				for (let i = 0; i < lines.length; i++) {
-					if (regex.test(lines[i])) {
-						results.push(`${rel}:${i + 1}: ${lines[i].trim()}`);
-						if (results.length >= MAX_RESULTS) return false;
-					}
-				}
-				return true;
+		for (let pattern of text.split("\n").map((line) => line.trim())) {
+			if (!pattern || pattern.startsWith("#")) continue;
+			const negate = pattern.startsWith("!");
+			if (negate) pattern = pattern.slice(1);
+			const directory = pattern.endsWith("/");
+			pattern = pattern.replace(/^\//, "").replace(/\/$/, "");
+			const regex = globToRegExp(pattern);
+			const fragment = regex.source.slice(1, -1);
+			result.push({
+				base: dir,
+				negate,
+				regex: new RegExp(
+					`^${pattern.includes("/") ? "" : "(?:.*/)?"}${fragment}${directory ? "(?:/.*)?" : ""}$`,
+				),
 			});
-
-			if (results.length === 0) {
-				return `No matches for "${pattern}" under ${directory}`;
-			}
-			return truncateOutput(results.join("\n"));
-		} catch (error) {
-			const err = error as NodeJS.ErrnoException;
-			return `Error searching file contents: ${err.message}`;
 		}
-	},
-});
+	}
+	return result;
+}
+function ignored(file: string, rules: IgnoreRule[]): boolean {
+	let skip = false;
+	for (const rule of rules)
+		if (
+			rule.regex.test(path.relative(rule.base, file).split(path.sep).join("/"))
+		)
+			skip = !rule.negate;
+	return skip;
+}
+async function files(
+	workspace: Workspace,
+	root: string,
+	signal?: AbortSignal,
+): Promise<string[]> {
+	const custom = await ignoreRules(workspace.root, [".toolwrightignore"]);
+	if (workspace.gitRoot) {
+		try {
+			const listed = await workspace.git(
+				[
+					"ls-files",
+					"--cached",
+					"--others",
+					"--exclude-standard",
+					"-z",
+					"--",
+					root,
+				],
+				signal,
+			);
+			return [
+				...new Set(
+					listed
+						.split("\0")
+						.filter(Boolean)
+						.map((file) => path.resolve(workspace.root, file)),
+				),
+			]
+				.filter((file) => !ignored(file, custom))
+				.slice(0, 20000);
+		} catch {
+			signal?.throwIfAborted();
+		}
+	}
+	const result: string[] = [];
+	async function walk(dir: string, inherited: IgnoreRule[]): Promise<void> {
+		signal?.throwIfAborted();
+		const rules = [
+			...inherited,
+			...(await ignoreRules(dir, [".gitignore", ".toolwrightignore"])),
+		];
+		const entries = await fs.readdir(dir, { withFileTypes: true });
+		for (const entry of entries) {
+			signal?.throwIfAborted();
+			if (result.length >= 20000) return;
+			const file = path.join(dir, entry.name);
+			if (SKIP.has(entry.name) || ignored(file, rules)) continue;
+			if (entry.isDirectory()) await walk(file, rules);
+			else if (entry.isFile()) result.push(file);
+		}
+	}
+	await walk(root, custom);
+	return result;
+}
+export function createSearchTools(workspace?: Workspace) {
+	const current = () =>
+		workspace ? Promise.resolve(workspace) : Workspace.open();
+	return {
+		globFiles: markTool(
+			tool({
+				description:
+					"Find workspace files using *, **, ? globs. Honors Git ignore rules and .toolwrightignore. Maximum 200 matches.",
+				inputSchema: z.object({
+					pattern: z.string(),
+					directory: z.string().default("."),
+				}),
+				execute: async ({ pattern, directory }, options) => {
+					const w = await current();
+					const root = await w.resolve(directory);
+					const regex = globToRegExp(pattern);
+					const matches = (await files(w, root, options.abortSignal))
+						.map((file) => path.relative(root, file))
+						.filter((file) => regex.test(file))
+						.sort()
+						.slice(0, 200);
+					return truncateOutput(matches.join("\n") || "No matching files.");
+				},
+			}),
+			"read",
+		),
+		searchCode: markTool(
+			tool({
+				description:
+					"Search text with a JavaScript regex, returning path:line:text. Honors ignore rules, size and binary limits. Maximum 200 results.",
+				inputSchema: z.object({
+					pattern: z.string(),
+					directory: z.string().default("."),
+					filePattern: z.string().optional(),
+				}),
+				execute: async ({ pattern, directory, filePattern }, options) => {
+					const w = await current();
+					const root = await w.resolve(directory);
+					const regex = new RegExp(pattern);
+					const fileRegex = filePattern ? globToRegExp(filePattern) : undefined;
+					const matches: string[] = [];
+					for (const file of await files(w, root, options.abortSignal)) {
+						options.abortSignal?.throwIfAborted();
+						const relative = path.relative(root, file);
+						if (fileRegex && !fileRegex.test(relative)) continue;
+						let text: string;
+						try {
+							text = await w.read(file, options.abortSignal);
+						} catch {
+							options.abortSignal?.throwIfAborted();
+							continue;
+						}
+						for (const [index, line] of text.split("\n").entries()) {
+							if (regex.test(line))
+								matches.push(`${relative}:${index + 1}: ${line.trim()}`);
+							if (matches.length >= 200)
+								return truncateOutput(matches.join("\n"));
+						}
+					}
+					return truncateOutput(matches.join("\n") || "No matches.");
+				},
+			}),
+			"read",
+		),
+	};
+}
+export const { globFiles, searchCode } = createSearchTools();

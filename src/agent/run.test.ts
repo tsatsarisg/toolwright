@@ -1,34 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type LanguageModel, type ToolSet, tool } from "ai";
+import { type ToolSet, tool } from "ai";
 import { z } from "zod";
 import type { AgentCallbacks, ToolCallInfo } from "../types.ts";
+import { markTool } from "./policy.ts";
 import { reportTokenUsage, resolveToolCalls, runAgent } from "./run.ts";
+import {
+	type ScriptedLanguageModel,
+	type ScriptedStreamPart,
+	scriptedUsage,
+} from "./testing.ts";
 
-/**
- * The handful of provider-level stream part shapes these tests emit. Not the
- * full LanguageModelV2StreamPart union — just enough to drive streamText.
- */
-type FakeStreamPart =
-	| { type: "stream-start"; warnings: unknown[] }
-	| { type: "text-start"; id: string }
-	| { type: "text-delta"; id: string; delta: string }
-	| { type: "text-end"; id: string }
-	| { type: "tool-call"; toolCallId: string; toolName: string; input: string }
-	| {
-			type: "finish";
-			finishReason: string;
-			usage: { inputTokens: number; outputTokens: number; totalTokens: number };
-	  };
-
-/**
- * A minimal fake LanguageModelV2 that streams a fixed sequence of parts.
- * `ai/test`'s MockLanguageModelV2 pulls in `msw` transitively, which this
- * project doesn't depend on — this hand-rolled version needs nothing extra.
- */
-function fakeStreamingModel(streamsFn: () => FakeStreamPart[]): LanguageModel {
+/** Typed provider double streams fixtures without network or extra dependencies. */
+function fakeStreamingModel(
+	streamsFn: () => ScriptedStreamPart[],
+): ScriptedLanguageModel {
 	return {
-		specificationVersion: "v2",
+		specificationVersion: "v4",
 		provider: "fake",
 		modelId: "fake-model",
 		supportedUrls: {},
@@ -36,7 +24,7 @@ function fakeStreamingModel(streamsFn: () => FakeStreamPart[]): LanguageModel {
 			throw new Error("not implemented — this fake only supports doStream");
 		},
 		doStream: async () => ({
-			stream: new ReadableStream<FakeStreamPart>({
+			stream: new ReadableStream<ScriptedStreamPart>({
 				start(controller) {
 					for (const part of streamsFn()) controller.enqueue(part);
 					controller.close();
@@ -44,8 +32,7 @@ function fakeStreamingModel(streamsFn: () => FakeStreamPart[]): LanguageModel {
 			}),
 			warnings: [],
 		}),
-		// biome-ignore lint/suspicious/noExplicitAny: hand-rolled test double, not a real provider — casting rather than reimplementing LanguageModelV2's full type surface
-	} as any;
+	};
 }
 
 /**
@@ -107,7 +94,7 @@ test("resolveToolCalls auto-approves read-only tools without prompting", async (
 
 	const { toolMessages, rejected } = await resolveToolCalls(
 		calls,
-		toolSet,
+		{ ...toolSet, readFile: markTool(toolSet.readFile, "read") },
 		[],
 		callbacks,
 		() => {},
@@ -276,14 +263,15 @@ test("runAgent streams text through the injected mock model", async () => {
 		{ type: "text-end", id: "1" },
 		{
 			type: "finish",
-			finishReason: "stop",
-			usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
+			finishReason: { unified: "stop", raw: undefined },
+			usage: scriptedUsage(3, 2),
 		},
 	]);
 
 	const { callbacks, tokens, getCompleted } = makeCallbacks();
 
 	const history = await runAgent("hi", [], callbacks, {
+		tools: {},
 		languageModel: model,
 		telemetry: false,
 	});
@@ -308,8 +296,8 @@ test("runAgent auto-approves a read-only tool call end to end, then finishes", a
 				},
 				{
 					type: "finish",
-					finishReason: "tool-calls",
-					usage: { inputTokens: 5, outputTokens: 1, totalTokens: 6 },
+					finishReason: { unified: "tool-calls", raw: undefined },
+					usage: scriptedUsage(5, 1),
 				},
 			];
 		}
@@ -320,8 +308,8 @@ test("runAgent auto-approves a read-only tool call end to end, then finishes", a
 			{ type: "text-end", id: "2" },
 			{
 				type: "finish",
-				finishReason: "stop",
-				usage: { inputTokens: 8, outputTokens: 1, totalTokens: 9 },
+				finishReason: { unified: "stop", raw: undefined },
+				usage: scriptedUsage(8, 1),
 			},
 		];
 	});
@@ -342,7 +330,7 @@ test("runAgent auto-approves a read-only tool call end to end, then finishes", a
 
 	await runAgent("read a.txt", [], callbacks, {
 		languageModel: model,
-		tools: toolSet,
+		tools: { ...toolSet, readFile: markTool(toolSet.readFile, "read") },
 		telemetry: false,
 	});
 

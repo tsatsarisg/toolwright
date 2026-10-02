@@ -14,7 +14,7 @@ import type { EvalData, EvalTarget } from "./types.ts";
  * - secondary: Likely selects certain tools, scored on precision/recall
  * - negative: Must NOT select any file tools
  */
-runToolSelectionEval(
+await runToolSelectionEval(
 	fileTools,
 	dataset as Array<{ data: EvalData; target: EvalTarget }>,
 	"file-tools-selection",

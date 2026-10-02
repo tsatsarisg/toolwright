@@ -14,7 +14,7 @@ import type { EvalData, EvalTarget } from "./types.ts";
  * - secondary: Likely selects runCommand, scored on precision/recall
  * - negative: Must NOT use shell for non-shell tasks
  */
-runToolSelectionEval(
+await runToolSelectionEval(
 	shellTools,
 	dataset as Array<{ data: EvalData; target: EvalTarget }>,
 	"shell-tools-selection",

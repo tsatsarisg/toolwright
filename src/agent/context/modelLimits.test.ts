@@ -12,6 +12,13 @@ test("getModelLimits matches a known model exactly", () => {
 	assert.equal(limits.contextWindow, 400000);
 });
 
+test("GPT-6 Luna retains its context window while avoiding long-context pricing", () => {
+	const limits = getModelLimits("gpt-6-luna");
+	assert.equal(limits.contextWindow, 1050000);
+	assert.equal(limits.outputLimit, 128000);
+	assert.equal(limits.inputLimit, 272000);
+});
+
 test("getModelLimits maps unknown gpt-5 variants to gpt-5 limits", () => {
 	const limits = getModelLimits("gpt-5-nano-2025");
 	assert.equal(limits.contextWindow, 400000);
@@ -19,7 +26,7 @@ test("getModelLimits maps unknown gpt-5 variants to gpt-5 limits", () => {
 
 test("getModelLimits falls back to defaults for unknown models", () => {
 	const limits = getModelLimits("some-other-model");
-	assert.equal(limits.contextWindow, 128000);
+	assert.equal(limits.contextWindow, 8192);
 });
 
 test("isOverThreshold respects the default threshold", () => {

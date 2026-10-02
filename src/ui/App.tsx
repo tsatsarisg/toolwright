@@ -1,11 +1,22 @@
 import type { ModelMessage } from "ai";
-import { Box, Text, useApp } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import { useCallback, useRef, useState } from "react";
+import {
+	compactConversation,
+	defaultSummarizer,
+} from "../agent/context/compaction.ts";
 import { extractMessageText } from "../agent/context/tokenEstimator.ts";
+import { type ResolvedProvider, resolveProvider } from "../agent/model.ts";
+import type { ApprovalDetails, ExecutionPolicy } from "../agent/policy.ts";
 import { runAgent } from "../agent/run.ts";
-import { saveSession } from "../agent/session.ts";
-import { DESTRUCTIVE_TOOLS } from "../agent/tools/index.ts";
-import type { TokenUsageInfo, ToolApprovalRequest } from "../types.ts";
+import { type SessionStore, sessionSnapshot } from "../agent/session.ts";
+import { portableHistory } from "../agent/system/filterMessages.ts";
+import type { Workspace } from "../agent/workspace.ts";
+import type {
+	RunOutcome,
+	TokenUsageInfo,
+	ToolApprovalRequest,
+} from "../types.ts";
 import { Input } from "./components/Input.tsx";
 import { type Message, MessageList } from "./components/MessageList.tsx";
 import { Spinner } from "./components/Spinner.tsx";
@@ -14,254 +25,297 @@ import { ToolApproval } from "./components/ToolApproval.tsx";
 import { ToolCall, type ToolCallProps } from "./components/ToolCall.tsx";
 
 interface AppProps {
-	/** Id this session is saved under (~/.toolwright/sessions/<project>/<id>.json). */
 	sessionId: string;
-	/** History loaded back in via --resume, if any. */
+	provider: ResolvedProvider;
+	workspace: Workspace;
+	store: SessionStore;
+	policy: ExecutionPolicy;
+	budgets?: { maxSteps?: number; maxTokens?: number; maxTurnMs?: number };
+	configPath?: string;
 	initialHistory?: ModelMessage[];
-	/** Model id override from --model. */
-	model?: string;
 }
-
-/** Rebuild the display transcript from a resumed history (tool messages are replay-only, not shown as bubbles). */
-function messagesFromHistory(history: ModelMessage[]): Message[] {
-	return history
-		.filter(
-			(m): m is ModelMessage & { role: "user" | "assistant" } =>
-				m.role === "user" || m.role === "assistant",
-		)
-		.map((m, i) => ({
-			id: `resumed-${i}`,
-			role: m.role,
-			content: extractMessageText(m),
-		}))
-		.filter((m) => m.content.trim().length > 0);
-}
-
-interface ActiveToolCall extends ToolCallProps {
-	id: string;
-}
-
-/**
- * Everything that can be true DURING a turn. streamingText and toolCalls are
- * not mutually exclusive — a single model response can stream text and emit
- * tool calls together — so they're tracked side by side. pendingApproval
- * overlays on top without erasing either: once it resolves, whatever text/
- * tool-call progress had already accumulated is still there underneath it.
- */
-interface WorkingState {
-	streamingText: string;
-	toolCalls: ActiveToolCall[];
-	pendingApproval: ToolApprovalRequest | null;
-}
-
-type TurnState = { status: "idle" } | ({ status: "working" } & WorkingState);
-
-const IDLE_TURN: TurnState = { status: "idle" };
-const newWorkingTurn = (): TurnState => ({
-	status: "working",
-	streamingText: "",
-	toolCalls: [],
-	pendingApproval: null,
-});
-
-export function App({ sessionId, initialHistory = [], model }: AppProps) {
+export function App({
+	sessionId,
+	provider: initialProvider,
+	workspace,
+	store,
+	policy,
+	budgets,
+	configPath,
+	initialHistory = [],
+}: AppProps) {
 	const { exit } = useApp();
-	const [messages, setMessages] = useState<Message[]>(() =>
-		messagesFromHistory(initialHistory),
+	const [provider, setProvider] = useState(initialProvider);
+	const [mode, setMode] = useState(policy.mode);
+	const [messages, setMessages] = useState<Message[]>(
+		initialHistory
+			.filter((m) => m.role === "user" || m.role === "assistant")
+			.map((m, index) => ({
+				id: `resume-${index}`,
+				role: m.role as Message["role"],
+				content: extractMessageText(m),
+			})),
 	);
-	const [conversationHistory, setConversationHistory] =
-		useState<ModelMessage[]>(initialHistory);
-	const [turn, setTurn] = useState<TurnState>(IDLE_TURN);
-	const [tokenUsage, setTokenUsage] = useState<TokenUsageInfo | null>(null);
-	// Tools the user chose "Always allow" for, this session only (in-memory,
-	// never written to disk) — checked before a prompt is even shown.
-	const alwaysAllowedRef = useRef<Set<string>>(new Set());
-	const nextMessageId = useRef(0);
-	const makeMessage = useCallback(
-		(role: Message["role"], content: string): Message => ({
-			id: `m${nextMessageId.current++}`,
-			role,
-			content,
-		}),
-		[],
-	);
-
-	const handleSubmit = useCallback(
-		async (userInput: string) => {
-			if (
-				userInput.toLowerCase() === "exit" ||
-				userInput.toLowerCase() === "quit"
-			) {
-				exit();
-				return;
-			}
-
-			setMessages((prev) => [...prev, makeMessage("user", userInput)]);
-			setTurn(newWorkingTurn());
-
+	const [working, setWorking] = useState(false);
+	const [streaming, setStreaming] = useState("");
+	const [output, setOutput] = useState("");
+	const [toolCalls, setToolCalls] = useState<
+		Array<ToolCallProps & { id: string }>
+	>([]);
+	const [approval, setApproval] = useState<ToolApprovalRequest | null>(null);
+	const [usage, setUsage] = useState<TokenUsageInfo | null>(null);
+	const nextId = useRef(0);
+	const history = useRef(initialHistory);
+	const outcome = useRef<RunOutcome | undefined>(undefined);
+	const active = useRef<AbortController | null>(null);
+	const pending = useRef<ToolApprovalRequest | null>(null);
+	const add = useCallback((role: Message["role"], content: string) => {
+		setMessages((prev) => [
+			...prev,
+			{ id: `message-${nextId.current++}`, role, content },
+		]);
+	}, []);
+	const save = useCallback(
+		async (currentHistory: ModelMessage[], selected = provider) => {
+			history.current = currentHistory;
 			try {
-				const newHistory = await runAgent(
-					userInput,
-					conversationHistory,
-					{
-						onToken: (token) => {
-							setTurn((prev) =>
-								prev.status === "working"
-									? { ...prev, streamingText: prev.streamingText + token }
-									: prev,
-							);
-						},
-						onToolCallStart: (name, args, toolCallId) => {
-							setTurn((prev) =>
-								prev.status === "working"
-									? {
-											...prev,
-											toolCalls: [
-												...prev.toolCalls,
-												{ id: toolCallId, name, args, status: "pending" },
-											],
-										}
-									: prev,
-							);
-						},
-						onToolCallEnd: (toolCallId, result) => {
-							setTurn((prev) =>
-								prev.status === "working"
-									? {
-											...prev,
-											toolCalls: prev.toolCalls.map((tc) =>
-												tc.id === toolCallId
-													? { ...tc, status: "complete", result }
-													: tc,
-											),
-										}
-									: prev,
-							);
-						},
-						onComplete: (response) => {
-							if (response) {
-								setMessages((prev) => [
-									...prev,
-									makeMessage("assistant", response),
-								]);
-							}
-							setTurn(IDLE_TURN);
-						},
-						onToolApproval: (name, args) => {
-							if (alwaysAllowedRef.current.has(name)) {
-								return Promise.resolve(true);
-							}
-							return new Promise<boolean>((resolve) => {
-								setTurn((prev) =>
-									prev.status === "working"
-										? {
-												...prev,
-												pendingApproval: { toolName: name, args, resolve },
-											}
-										: prev,
-								);
-							});
-						},
-						onTokenUsage: (usage) => {
-							setTokenUsage(usage);
-						},
-					},
-					{ model },
+				await store.save(
+					sessionSnapshot(
+						sessionId,
+						currentHistory,
+						workspace,
+						selected.settings,
+						outcome.current,
+					),
 				);
-
-				setConversationHistory(newHistory);
-				// Best-effort: a failed save shouldn't interrupt the session.
-				saveSession(sessionId, newHistory).catch(() => {});
 			} catch (error) {
-				const errorMessage =
-					error instanceof Error ? error.message : "Unknown error";
-				setMessages((prev) => [
-					...prev,
-					makeMessage("assistant", `Error: ${errorMessage}`),
-				]);
-				setTurn(IDLE_TURN);
+				add(
+					"assistant",
+					`Session save failed: ${error instanceof Error ? error.message : error}`,
+				);
 			}
 		},
-		[conversationHistory, exit, makeMessage, model, sessionId],
+		[add, provider, sessionId, store, workspace],
 	);
-
-	const working = turn.status === "working" ? turn : null;
-	const pendingApproval = working?.pendingApproval ?? null;
-	const isThinking =
-		working !== null &&
-		!working.streamingText &&
-		working.toolCalls.length === 0 &&
-		!pendingApproval;
-
+	const requestApproval = useCallback(
+		(name: string, args: unknown, details?: ApprovalDetails) =>
+			new Promise<boolean>((resolve) => {
+				const request = { toolName: name, args, details, resolve };
+				pending.current = request;
+				setApproval(request);
+			}),
+		[],
+	);
+	const cancel = useCallback(() => {
+		active.current?.abort(new Error("Cancelled by user"));
+		pending.current?.resolve(false);
+		pending.current = null;
+		setApproval(null);
+	}, []);
+	useInput((input, key) => {
+		if (key.escape || (key.ctrl && input === "c")) {
+			if (active.current || pending.current) cancel();
+			else if (key.ctrl) exit();
+		}
+	});
+	const submit = useCallback(
+		async (input: string) => {
+			if (working) return;
+			try {
+				const [command, ...args] = input.trim().split(/\s+/);
+				if (["exit", "quit", "/exit"].includes(command)) {
+					exit();
+					return;
+				}
+				if (command === "/help") {
+					add(
+						"assistant",
+						"/model [profile] <id> — select between turns\n/plan — toggle plan/edit mode\n/diff — agent changes\n/compact — summarize history\n/exit — quit\nShift+Enter: newline; Escape/Ctrl+C: cancel active turn.",
+					);
+					return;
+				}
+				if (command === "/plan") {
+					policy.mode = policy.mode === "plan" ? "edit" : "plan";
+					setMode(policy.mode);
+					add("assistant", `Permission mode: ${policy.mode}`);
+					return;
+				}
+				if (command === "/diff") {
+					add("assistant", workspace.diff());
+					return;
+				}
+				if (command === "/model") {
+					if (!args.length) {
+						add(
+							"assistant",
+							`Current: ${provider.settings.profile}/${provider.settings.model}. Use /model [profile] <id>.`,
+						);
+						return;
+					}
+					if (args.length > 2) throw new Error("Use /model [profile] <id>.");
+					const selection =
+						args.length === 2
+							? { profile: args[0], model: args[1] }
+							: { ...provider.settings, model: args[0] };
+					const selected = resolveProvider(selection, {
+						configPath,
+						cwd: workspace.root,
+					});
+					if (provider.settings.localOnly && !selected.settings.localOnly) {
+						setWorking(true);
+						const approved = await requestApproval(
+							"sendSessionToProvider",
+							{
+								endpoint: selected.settings.baseURL,
+								explanation:
+									"Consent to send this local-only session's history to the selected provider and change its data policy.",
+							},
+							{
+								kind: "network",
+								destructive: true,
+								grantKey: "cloud-transition",
+							},
+						);
+						setWorking(false);
+						if (!approved) {
+							add("assistant", "Provider transition declined.");
+							return;
+						}
+					}
+					setProvider(selected);
+					history.current = portableHistory(history.current);
+					setUsage(null);
+					await save(history.current, selected);
+					add(
+						"assistant",
+						`Selected ${selected.settings.profile}/${selected.settings.model} (${selected.limits.contextWindow} context tokens).`,
+					);
+					return;
+				}
+				if (command.startsWith("/") && command !== "/compact")
+					throw new Error("Unknown slash command. Use /help.");
+				outcome.current = undefined;
+				active.current = new AbortController();
+				setWorking(true);
+				setStreaming("");
+				setOutput("");
+				setToolCalls([]);
+				if (command === "/compact") {
+					await save(
+						await compactConversation(
+							history.current,
+							provider,
+							defaultSummarizer(provider, active.current.signal),
+							{ includeCurrentTurn: true },
+						),
+					);
+					add("assistant", "Conversation compacted.");
+					return;
+				}
+				add("user", input);
+				await runAgent(
+					input,
+					history.current,
+					{
+						onToken: (token) => setStreaming((prev) => prev + token),
+						onToolCallStart: (name, args, id) =>
+							setToolCalls((prev) => [
+								...prev,
+								{ id, name, args, status: "pending" },
+							]),
+						onToolCallEnd: (id, result) =>
+							setToolCalls((prev) =>
+								prev.map((call) =>
+									call.id === id
+										? { ...call, status: "complete", result }
+										: call,
+								),
+							),
+						onToolApproval: requestApproval,
+						onCommandOutput: (text) =>
+							setOutput((prev) => (prev + text).slice(-8000)),
+						onTokenUsage: setUsage,
+						onOutcome: (result) => {
+							outcome.current = result;
+						},
+						onCheckpoint: save,
+						onComplete: (text) => {
+							if (text) add("assistant", text);
+						},
+					},
+					{
+						resolvedProvider: provider,
+						workspace,
+						policy,
+						...budgets,
+						signal: active.current.signal,
+					},
+				);
+			} catch (error) {
+				add(
+					"assistant",
+					`Error: ${error instanceof Error ? error.message : error}`,
+				);
+			} finally {
+				active.current = null;
+				pending.current = null;
+				setApproval(null);
+				setWorking(false);
+				setStreaming("");
+			}
+		},
+		[
+			working,
+			exit,
+			add,
+			policy,
+			provider,
+			configPath,
+			workspace,
+			requestApproval,
+			save,
+			budgets,
+		],
+	);
 	return (
 		<Box flexDirection="column" padding={1}>
-			<Box marginBottom={1}>
-				<Text bold color="magenta">
-					🤖 AI Agent
-				</Text>
-				<Text dimColor> (type "exit" to quit)</Text>
-			</Box>
-
 			<Box flexDirection="column" marginBottom={1}>
-				<MessageList messages={messages} />
-
-				{working?.streamingText && (
-					<Box flexDirection="column" marginTop={1}>
-						<Text color="green" bold>
-							› Assistant
-						</Text>
-						<Box marginLeft={2}>
-							<Text>{working.streamingText}</Text>
-							<Text color="gray">▌</Text>
-						</Box>
-					</Box>
-				)}
-
-				{working && working.toolCalls.length > 0 && !pendingApproval && (
-					<Box flexDirection="column" marginTop={1}>
-						{working.toolCalls.map((tc) => (
-							<ToolCall
-								key={tc.id}
-								name={tc.name}
-								args={tc.args}
-								status={tc.status}
-								result={tc.result}
-							/>
-						))}
-					</Box>
-				)}
-
-				{isThinking && (
-					<Box marginTop={1}>
-						<Spinner />
-					</Box>
-				)}
-
-				{pendingApproval && (
-					<ToolApproval
-						toolName={pendingApproval.toolName}
-						args={pendingApproval.args}
-						destructive={DESTRUCTIVE_TOOLS.has(pendingApproval.toolName)}
-						onResolve={(decision) => {
-							if (decision === "always") {
-								alwaysAllowedRef.current.add(pendingApproval.toolName);
-							}
-							pendingApproval.resolve(decision !== "no");
-							setTurn((prev) =>
-								prev.status === "working"
-									? { ...prev, pendingApproval: null }
-									: prev,
-							);
-						}}
-					/>
-				)}
+				<Text bold color="magenta">
+					Toolwright · {provider.settings.profile}/{provider.settings.model} ·{" "}
+					{mode}
+					{provider.settings.localOnly ? " · local-only" : ""}
+				</Text>
+				<Text dimColor>
+					{workspace.root} · /help for commands · Escape cancels
+				</Text>
 			</Box>
-
-			{!pendingApproval && (
-				<Input onSubmit={handleSubmit} disabled={turn.status === "working"} />
+			<MessageList messages={messages} />
+			{working && streaming && <Text color="green">{streaming}</Text>}
+			{working && !streaming && !approval && <Spinner />}
+			{working && toolCalls.map((call) => <ToolCall key={call.id} {...call} />)}
+			{working && output && (
+				<Box marginTop={1}>
+					<Text dimColor>{output}</Text>
+				</Box>
 			)}
-
-			<TokenUsage usage={tokenUsage} />
+			{approval && (
+				<ToolApproval
+					toolName={approval.toolName}
+					args={approval.args}
+					destructive={approval.details?.destructive ?? true}
+					preview={approval.details?.preview}
+					allowGrant={!!approval.details && !approval.details.destructive}
+					onResolve={(decision) => {
+						if (decision === "always" && approval.details)
+							policy.grant(approval.details);
+						approval.resolve(decision !== "no");
+						pending.current = null;
+						setApproval(null);
+					}}
+				/>
+			)}
+			{!approval && <Input onSubmit={submit} disabled={working} />}
+			<TokenUsage usage={usage} />
 		</Box>
 	);
 }
