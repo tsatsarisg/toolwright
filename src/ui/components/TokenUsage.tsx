@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import type { TokenUsageInfo } from "../../types.ts";
+import type { TokenUsageInfo } from "../../agent/context/types.ts";
 
 interface TokenUsageProps {
 	usage: TokenUsageInfo | null;

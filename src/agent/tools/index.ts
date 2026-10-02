@@ -1,6 +1,6 @@
 import type { ToolSet } from "@ai-sdk/provider-utils";
-import type { ProviderSettings } from "../config.ts";
-import type { Workspace } from "../workspace.ts";
+import type { ProviderSettings } from "../../config/types.ts";
+import type { Workspace } from "../../workspace/workspace.ts";
 import {
 	createFileTools,
 	deleteFile,
@@ -90,9 +90,6 @@ export function toModelTools(toolSet: ToolSet): ToolSet {
 	);
 }
 
-/** Default model-facing toolset. */
-export const modelTools: ToolSet = toModelTools(tools);
-
 // Tool sets for evals
 export const fileTools = {
 	readFile,
@@ -104,43 +101,4 @@ export const fileTools = {
 
 export const shellTools = {
 	runCommand,
-};
-
-/**
- * Legacy names for consumers; runtime authorization uses registered metadata.
- */
-export const READ_ONLY_TOOLS = new Set<string>([
-	"readFile",
-	"listFiles",
-	"globFiles",
-	"searchCode",
-	"webSearch",
-]);
-
-/**
- * Tools that can destroy or overwrite data. The approval UI styles these
- * distinctly from a routine confirmation so approval fatigue on the safe
- * majority of prompts doesn't bleed into the ones that matter.
- */
-export const DESTRUCTIVE_TOOLS = new Set<string>([
-	"writeFile",
-	"editFile",
-	"deleteFile",
-	"runCommand",
-]);
-
-/**
- * Argument key(s) worth showing inline in the approval preview, per tool.
- * Lives here (next to the tool definitions) rather than in the UI layer,
- * since it's knowledge about what each tool's arguments mean.
- */
-export const PREVIEW_ARG_KEYS: Record<string, string[]> = {
-	readFile: ["path"],
-	writeFile: ["path"],
-	editFile: ["path"],
-	listFiles: ["directory"],
-	deleteFile: ["path"],
-	globFiles: ["pattern"],
-	searchCode: ["pattern"],
-	runCommand: ["command"],
 };

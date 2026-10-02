@@ -1,7 +1,7 @@
 import { generateText, Output } from "ai";
 import { z } from "zod";
-import { resolveProvider } from "../src/agent/model.ts";
-import { inferenceTelemetry } from "../src/agent/telemetry.ts";
+import { resolveProvider } from "../src/providers/resolve.ts";
+import { inferenceTelemetry } from "../src/providers/telemetry.ts";
 
 import type {
 	EvalTarget,

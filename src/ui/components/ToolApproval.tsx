@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useState } from "react";
-import { PREVIEW_ARG_KEYS } from "../../agent/tools/index.ts";
 import { truncate } from "../../agent/tools/truncate.ts";
+import { PREVIEW_ARG_KEYS } from "../toolPreview.ts";
 
 interface ToolApprovalProps {
 	toolName: string;

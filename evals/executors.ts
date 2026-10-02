@@ -1,8 +1,8 @@
 import { generateText, isStepCount, type ModelMessage, type ToolSet } from "ai";
-import { resolveProvider } from "../src/agent/model.ts";
-import { getSystemPrompt } from "../src/agent/system/prompt.ts";
-import { inferenceTelemetry } from "../src/agent/telemetry.ts";
+import { getSystemPrompt } from "../src/agent/prompt.ts";
 import { selectProviderTools } from "../src/agent/tools/index.ts";
+import { resolveProvider } from "../src/providers/resolve.ts";
+import { inferenceTelemetry } from "../src/providers/telemetry.ts";
 import type {
 	EvalData,
 	MultiTurnEvalData,

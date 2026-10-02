@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type ToolSet, tool } from "ai";
 import { z } from "zod";
-import type { AgentCallbacks, ToolCallInfo } from "../types.ts";
-import { markTool } from "./policy.ts";
-import { reportTokenUsage, resolveToolCalls, runAgent } from "./run.ts";
+import { recordCallbacks } from "../../tests/helpers/callbacks.ts";
 import {
 	type ScriptedLanguageModel,
 	type ScriptedStreamPart,
 	scriptedUsage,
-} from "./testing.ts";
+} from "../../tests/helpers/scriptedModel.ts";
+import { markTool } from "./execution/policy.ts";
+import { runAgent } from "./run.ts";
 
 /** Typed provider double streams fixtures without network or extra dependencies. */
 function fakeStreamingModel(
@@ -35,223 +35,6 @@ function fakeStreamingModel(
 	};
 }
 
-/**
- * Fresh AgentCallbacks with tracking arrays for each test. Approval defaults
- * to "always approve" so tests that don't care about the approval path don't
- * have to wire it up.
- */
-function makeCallbacks(
-	onToolApproval: AgentCallbacks["onToolApproval"] = async () => true,
-) {
-	const tokens: string[] = [];
-	const toolStarts: ToolCallInfo[] = [];
-	const toolEnds: Array<{ id: string; result: string }> = [];
-	let completedText: string | null = null;
-
-	const callbacks: AgentCallbacks = {
-		onToken: (t) => tokens.push(t),
-		onToolCallStart: (name, args, toolCallId) =>
-			toolStarts.push({
-				toolName: name,
-				args: args as Record<string, unknown>,
-				toolCallId,
-			}),
-		onToolCallEnd: (toolCallId, result) =>
-			toolEnds.push({ id: toolCallId, result }),
-		onComplete: (response) => {
-			completedText = response;
-		},
-		onToolApproval,
-	};
-
-	return {
-		callbacks,
-		tokens,
-		toolStarts,
-		toolEnds,
-		getCompleted: () => completedText,
-	};
-}
-
-// --- resolveToolCalls: the extracted, streamText-free approval/execution seam ---
-
-test("resolveToolCalls auto-approves read-only tools without prompting", async () => {
-	const calls: ToolCallInfo[] = [
-		{ toolCallId: "1", toolName: "readFile", args: { path: "a.txt" } },
-	];
-	const toolSet: ToolSet = {
-		readFile: tool({
-			description: "read",
-			inputSchema: z.object({ path: z.string() }),
-			execute: async ({ path }: { path: string }) => `contents of ${path}`,
-		}),
-	};
-	let approvalCalls = 0;
-	const { callbacks, toolEnds } = makeCallbacks(async () => {
-		approvalCalls++;
-		return false;
-	});
-
-	const { toolMessages, rejected } = await resolveToolCalls(
-		calls,
-		{ ...toolSet, readFile: markTool(toolSet.readFile, "read") },
-		[],
-		callbacks,
-		() => {},
-	);
-
-	assert.equal(
-		approvalCalls,
-		0,
-		"a read-only tool must never trigger an approval prompt",
-	);
-	assert.equal(rejected, false);
-	assert.equal(toolEnds[0].result, "contents of a.txt");
-	assert.equal(toolMessages.length, 1);
-});
-
-test("resolveToolCalls prompts for approval on non-read-only tools", async () => {
-	const calls: ToolCallInfo[] = [
-		{
-			toolCallId: "1",
-			toolName: "writeFile",
-			args: { path: "a.txt", content: "hi" },
-		},
-	];
-	const toolSet: ToolSet = {
-		writeFile: tool({
-			description: "write",
-			inputSchema: z.object({ path: z.string(), content: z.string() }),
-			execute: async () => "wrote",
-		}),
-	};
-	let approvalCalls = 0;
-	const { callbacks, toolEnds } = makeCallbacks(async () => {
-		approvalCalls++;
-		return true;
-	});
-
-	const { rejected } = await resolveToolCalls(
-		calls,
-		toolSet,
-		[],
-		callbacks,
-		() => {},
-	);
-
-	assert.equal(approvalCalls, 1);
-	assert.equal(rejected, false);
-	assert.equal(toolEnds[0].result, "wrote");
-});
-
-test("resolveToolCalls declines all remaining calls after one rejection, without re-prompting", async () => {
-	const calls: ToolCallInfo[] = [
-		{ toolCallId: "1", toolName: "writeFile", args: {} },
-		{ toolCallId: "2", toolName: "deleteFile", args: {} },
-	];
-	const toolSet: ToolSet = {
-		writeFile: tool({
-			description: "w",
-			inputSchema: z.object({}),
-			execute: async () => "wrote",
-		}),
-		deleteFile: tool({
-			description: "d",
-			inputSchema: z.object({}),
-			execute: async () => "deleted",
-		}),
-	};
-	let approvalCalls = 0;
-	const { callbacks, toolEnds } = makeCallbacks(async () => {
-		approvalCalls++;
-		return false;
-	});
-
-	const { rejected, toolMessages } = await resolveToolCalls(
-		calls,
-		toolSet,
-		[],
-		callbacks,
-		() => {},
-	);
-
-	assert.equal(rejected, true);
-	assert.equal(
-		approvalCalls,
-		1,
-		"must not re-prompt after the first rejection",
-	);
-	assert.equal(toolEnds[0].result, "The user declined to run this tool.");
-	assert.equal(toolEnds[1].result, "The user declined to run this tool.");
-	assert.equal(toolMessages.length, 2);
-});
-
-// --- reportTokenUsage: pure formatting/reporting, no streamText involved ---
-
-test("reportTokenUsage prefers real provider counts over the estimate", () => {
-	let reported:
-		| Parameters<NonNullable<AgentCallbacks["onTokenUsage"]>>[0]
-		| undefined;
-	const callbacks: AgentCallbacks = {
-		onToken: () => {},
-		onToolCallStart: () => {},
-		onToolCallEnd: () => {},
-		onComplete: () => {},
-		onToolApproval: async () => true,
-		onTokenUsage: (usage) => {
-			reported = usage;
-		},
-	};
-
-	reportTokenUsage(
-		callbacks,
-		"system",
-		[{ role: "user", content: "hi" }],
-		1000,
-		{ inputTokens: 10, outputTokens: 5, totalTokens: 15 },
-	);
-
-	assert.equal(reported?.totalTokens, 15);
-	assert.equal(reported?.contextWindow, 1000);
-});
-
-test("reportTokenUsage falls back to an estimate when there's no real usage", () => {
-	let reported:
-		| Parameters<NonNullable<AgentCallbacks["onTokenUsage"]>>[0]
-		| undefined;
-	const callbacks: AgentCallbacks = {
-		onToken: () => {},
-		onToolCallStart: () => {},
-		onToolCallEnd: () => {},
-		onComplete: () => {},
-		onToolApproval: async () => true,
-		onTokenUsage: (usage) => {
-			reported = usage;
-		},
-	};
-
-	reportTokenUsage(
-		callbacks,
-		"system prompt",
-		[{ role: "user", content: "hello world" }],
-		1000,
-	);
-
-	assert.ok(reported && reported.totalTokens > 0);
-});
-
-test("reportTokenUsage no-ops when the caller didn't ask for usage updates", () => {
-	const callbacks: AgentCallbacks = {
-		onToken: () => {},
-		onToolCallStart: () => {},
-		onToolCallEnd: () => {},
-		onComplete: () => {},
-		onToolApproval: async () => true,
-	};
-	// Should not throw with no onTokenUsage callback.
-	reportTokenUsage(callbacks, "system", [], 1000);
-});
-
 // --- runAgent: end-to-end through an injected mock model (no real API calls) ---
 
 test("runAgent streams text through the injected mock model", async () => {
@@ -268,7 +51,7 @@ test("runAgent streams text through the injected mock model", async () => {
 		},
 	]);
 
-	const { callbacks, tokens, getCompleted } = makeCallbacks();
+	const { callbacks, tokens, getCompleted } = recordCallbacks();
 
 	const history = await runAgent("hi", [], callbacks, {
 		tools: {},
@@ -323,7 +106,7 @@ test("runAgent auto-approves a read-only tool call end to end, then finishes", a
 	};
 
 	let approvalCalls = 0;
-	const { callbacks, toolEnds, getCompleted } = makeCallbacks(async () => {
+	const { callbacks, toolEnds, getCompleted } = recordCallbacks(async () => {
 		approvalCalls++;
 		return true;
 	});

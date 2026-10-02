@@ -26,10 +26,10 @@
 		"dist"
 	],
 	"scripts": {
-		"build": "tsc -p tsconfig.build.json",
+		"build": "node scripts/build.mjs",
 		"dev": "tsx watch src/cli.ts",
 		"start": "tsx src/cli.ts",
-		"test": "node --import tsx --test \"src/**/*.test.ts\" \"evals/**/*.test.ts\"",
+		"test": "node --import tsx --test \"src/**/*.test.ts\" \"tests/**/*.test.ts\" \"evals/**/*.test.ts\"",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"lint": "biome check .",
 		"eval": "pnpm eval:coding",

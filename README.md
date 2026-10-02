@@ -114,7 +114,9 @@ Existing tool-selection and multiturn evals also select profiles through dataset
 
 ## Source
 
-`src/cli.ts` wires CLI/headless operation; `src/ui/` contains the terminal interface. `src/agent/` contains configuration, adapters, execution policy, workspace operations, sessions, and context management. `evals/` contains objective coding and tool-selection evaluations.
+`src/cli.ts` wires startup; `src/cli/` owns flags, help, and headless events. `src/config/` owns profile selection and endpoint policy, and `src/providers/` owns model adapters, transport, diagnostics, and telemetry. `src/agent/` owns the turn loop, execution policy, tools, history, and context budgets. `src/workspace/` owns confined file operations and host processes; `src/sessions/` owns durable session formats and storage. `src/ui/` separates terminal rendering from session control.
+
+Unit tests live beside their modules. `tests/integration/` checks complete CLI, execution, and terminal-session behavior; `tests/helpers/` supplies scripted models. `evals/coding/` separates objective fixtures, execution, and verification. Builds clean obsolete output and emit runtime modules only. See [architecture](docs/architecture.md) for responsibilities and change boundaries.
 
 ## License
 

@@ -1,10 +1,10 @@
 import { generateText, type ModelMessage } from "ai";
+import { DEFAULT_MODEL } from "../../config/defaults.ts";
 import {
-	DEFAULT_MODEL,
 	type ResolvedProvider,
 	resolveProvider,
-} from "../model.ts";
-import { inferenceTelemetry } from "../telemetry.ts";
+} from "../../providers/resolve.ts";
+import { inferenceTelemetry } from "../../providers/telemetry.ts";
 import { estimateTokens, extractMessageText } from "./tokenEstimator.ts";
 
 const SUMMARIZATION_PROMPT = `You are a conversation summarizer. Your task is to create a concise summary of the conversation so far that preserves:

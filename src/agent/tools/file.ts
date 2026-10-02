@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import { tool } from "ai";
 import { z } from "zod";
-import { markTool } from "../policy.ts";
-import { Workspace } from "../workspace.ts";
+import { Workspace } from "../../workspace/workspace.ts";
+import { markTool } from "../execution/policy.ts";
 import { truncateOutput } from "./truncate.ts";
 
 export function createFileTools(workspace?: Workspace) {
@@ -40,9 +40,13 @@ export function createFileTools(workspace?: Workspace) {
 				"Create or replace a text file. Prefer editFile for existing files. A diff is reviewed before writing.",
 			inputSchema: z.object({ path: z.string(), content: z.string() }),
 			execute: async (args, options) => {
-				const w = await current();
-				return w.apply(
-					await w.prepare("writeFile", args, options.abortSignal),
+				const currentWorkspace = await current();
+				return currentWorkspace.apply(
+					await currentWorkspace.prepare(
+						"writeFile",
+						args,
+						options.abortSignal,
+					),
 					options.abortSignal,
 				);
 			},
@@ -59,9 +63,9 @@ export function createFileTools(workspace?: Workspace) {
 				new_string: z.string(),
 			}),
 			execute: async (args, options) => {
-				const w = await current();
-				return w.apply(
-					await w.prepare("editFile", args, options.abortSignal),
+				const currentWorkspace = await current();
+				return currentWorkspace.apply(
+					await currentWorkspace.prepare("editFile", args, options.abortSignal),
 					options.abortSignal,
 				);
 			},
@@ -74,9 +78,13 @@ export function createFileTools(workspace?: Workspace) {
 				"Delete a file after reviewing its deletion. Requires specific approval.",
 			inputSchema: z.object({ path: z.string() }),
 			execute: async (args, options) => {
-				const w = await current();
-				return w.apply(
-					await w.prepare("deleteFile", args, options.abortSignal),
+				const currentWorkspace = await current();
+				return currentWorkspace.apply(
+					await currentWorkspace.prepare(
+						"deleteFile",
+						args,
+						options.abortSignal,
+					),
 					options.abortSignal,
 				);
 			},

@@ -1,5 +1,5 @@
 import { evaluate } from "@lmnr-ai/lmnr";
-import { resolveProvider } from "../src/agent/model.ts";
+import { resolveProvider } from "../src/providers/resolve.ts";
 
 /** Local profiles run the same assertions without initializing Laminar or exporting task content. */
 export async function runEvaluation<

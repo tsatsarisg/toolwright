@@ -1,4 +1,4 @@
-import type { ModelLimits } from "../../types.ts";
+import type { ModelLimits } from "./types.ts";
 
 /**
  * Default threshold for context window usage (80%)

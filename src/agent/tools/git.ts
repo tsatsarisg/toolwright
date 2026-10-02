@@ -1,7 +1,7 @@
 import { tool } from "ai";
 import { z } from "zod";
-import { markTool } from "../policy.ts";
-import type { Workspace } from "../workspace.ts";
+import type { Workspace } from "../../workspace/workspace.ts";
+import { markTool } from "../execution/policy.ts";
 import { truncateOutput } from "./truncate.ts";
 
 export function createGitTools(workspace: Workspace) {
